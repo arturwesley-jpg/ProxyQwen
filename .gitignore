@@ -1,0 +1,25 @@
+node_modules/
+dist/
+.env
+*.log
+pnpm-debug.log*
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+sessions.db
+accounts.db
+
+# Account configurations with credentials
+accounts.json
+accounts.config.json
+*accounts*.json
+
+# Environment files with secrets
+.env.local
+.env.production
+
+# OS files
+.DS_Store
+Thumbs.db

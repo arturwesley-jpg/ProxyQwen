@@ -1,0 +1,34 @@
+services:
+  qwenproxy:
+    build: .
+    container_name: qwenproxy
+    ports:
+      - "${PORT:-3000}:3000"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./qwen_profiles:/app/qwen_profiles
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+          cpus: '4'
+        reservations:
+          memory: 4G
+    shm_size: 4g
+    ulimits:
+      memlock: -1
+      nofile: 65536
+    environment:
+      - NODE_OPTIONS=--max-old-space-size=6144 --expose-gc
+      - RAM_WARNING=95
+      - RAM_CRITICAL=98
+      - WS_WARNING=100
+      - WS_CRITICAL=200

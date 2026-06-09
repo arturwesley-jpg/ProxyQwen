@@ -1,0 +1,36 @@
+# Patch: Modelos Qwen no Hermes Model Picker
+# Aplica em: ~/.hermes/config.yaml
+# Data: 2026-06-09
+# Descrição: Adiciona 10 modelos Qwen (com e sem thinking) ao provider custom:proxy-qwen
+# para aparecerem no Model Picker do Hermes.
+
+# ANTES (string JSON):
+#   custom:proxy-qwen:
+#     base_url: http://localhost:3000/v1
+#     api_key: test-key-123
+#     models: '["qwen3.7-plus","qwen3.7-plus-no-thinking","qwen3.7-max","qwen3.7-max-no-thinking","qwen3.6-plus","qwen3.6-plus-no-thinking","qwen3.6-max-preview","qwen3.6-max-preview-no-thinking","qwen3.6-27b","qwen3.6-27b-no-thinking"]'
+
+# DEPOIS (lista YAML - formato correto esperado pelo Hermes):
+providers:
+  custom:proxy-qwen:
+    base_url: http://localhost:3000/v1
+    api_key: test-key-123
+    models:
+      - qwen3.7-plus
+      - qwen3.7-plus-no-thinking
+      - qwen3.7-max
+      - qwen3.7-max-no-thinking
+      - qwen3.6-plus
+      - qwen3.6-plus-no-thinking
+      - qwen3.6-max-preview
+      - qwen3.6-max-preview-no-thinking
+      - qwen3.6-27b
+      - qwen3.6-27b-no-thinking
+
+# Como aplicar após update do Hermes:
+# 1. Edite ~/.hermes/config.yaml
+# 2. Substitua o bloco 'custom:proxy-qwen' pelo acima
+# 3. Reinicie o Hermes: hermes-daemon restart (ou saia e entre no hermes CLI)
+#
+# Verificação: No model picker (digite "model"), deve aparecer:
+#   custom:proxy-qwen (10 models)
