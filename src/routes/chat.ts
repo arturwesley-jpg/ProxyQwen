@@ -260,11 +260,31 @@ export async function chatCompletions(c: Context) {
       finalPrompt = systemPrompt ? `${systemPrompt}\n${prompt}` : prompt;
     }
 
-    // Reforço de instrução de tool call para contextos longos (mitiga "Lost in the Middle")
-    if (hasTools && estimatedTokens > 15000) {
-      finalPrompt += '\n\n[CRITICAL REMINDER: You MUST use the exact <tool_call> JSON format specified in the system instructions. Do not hallucinate tool names or output raw JSON without the tags.]';
-    }
+    // CRITICAL: Aggressive tool call format reinforcement for ALL contexts with tools
+    // Qwen models frequently generate malformed tool calls - we must reinforce constantly
+    if (hasTools) {
+      finalPrompt += `
 
+=== CRITICAL TOOL CALL FORMAT (MANDATORY) ===
+When you need to call a tool, you MUST output EXACTLY this format:
+
+
+{"name": "tool_name", "arguments": {"param": "value"}}
+
+=== FORBIDDEN (NEVER DO THESE) ===
+WRONG:  {"name":"terminal"}
+{"command":"ls"}
+WRONG:  {"name":"read_file","path":"file.txt"}
+WRONG:  {"name":"X"}
+{"key":"value"}
+
+=== RULES ===
+1. ONE JSON object with "name" AND "arguments" fields
+2. "arguments" MUST be an object with the tool parameters
+3. NEVER split across multiple JSON objects
+4. NEVER use "path", "command" etc. at top level - they go INSIDE "arguments"
+`;
+    }
     const isThinkingModel = !body.model.includes('no-thinking');
     const isNewSession = !messages.some(m => m.role === 'assistant');
 
