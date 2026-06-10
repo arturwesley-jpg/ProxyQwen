@@ -121,7 +121,7 @@ async function createRealQwenChat(header: Record<string, string>): Promise<strin
     }),
     signal: AbortSignal.timeout(30000),
     dispatcher: qwenAgent,
-  });
+  } as any);
 
   if (!response.ok) throw new Error(`Failed to create chat: ${response.status}`);
   const text = await response.text().catch(() => '');
@@ -289,7 +289,7 @@ export async function disableNativeTools(accountId?: string): Promise<void> {
       body: JSON.stringify(payload),
       signal: controller.signal,
       dispatcher: qwenAgent,
-      });
+    } as any);
     clearTimeout(timeoutId);
 
     if (!response.ok) {
@@ -541,7 +541,7 @@ export async function createQwenStream(
     body: bodyToSend,
     signal: controller.signal,
     dispatcher: qwenAgent,
-  });
+  } as any);
   clearTimeout(timeoutId);
 
   if (!response.ok || !response.body) {

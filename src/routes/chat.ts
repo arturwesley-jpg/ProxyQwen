@@ -612,7 +612,6 @@ WRONG:  {"name":"X"}
         let targetResponseIdSet = false;
         let currentThoughtIndex = 0;
         const toolParser = hasTools ? new StreamingToolParser(bodyAny.tools) : null;
-        const decoder = new TextDecoder();
         const bufferChunks: string[] = [];
         let bufferOffset = 0;
         let cachedBuffer: string | null = null;
@@ -635,10 +634,6 @@ WRONG:  {"name":"X"}
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-
-          const decodedChunk = decoder.decode(value, { stream: true });
-          bufferChunks.push(decodedChunk);
-          invalidateCache();
 
           const decodedChunk = decoder.decode(value, { stream: true });
           bufferChunks.push(decodedChunk);
@@ -771,22 +766,12 @@ WRONG:  {"name":"X"}
             } else {
               // Keep only unprocessed portion
               const remaining = buffer.slice(bufferOffset);
-              if (bufferOffset > 0) {
-                // Optimize: remove processed data without repeated string allocations
-                if (bufferOffset >= buffer.length) {
-                  bufferChunks.length = 0;
-                  bufferOffset = 0;
-                } else {
-                  const remaining = buffer.slice(bufferOffset);
-                  bufferChunks.length = 0;
-                  bufferChunks.push(remaining);
-                  bufferOffset = 0;
-                }
-                invalidateCache();
-              }
+              bufferChunks.length = 0;
+              bufferChunks.push(remaining);
+              bufferOffset = 0;
+            }
             invalidateCache();
           }
-
         }
 
         const finalBuffer = getBuffer();
@@ -875,7 +860,6 @@ WRONG:  {"name":"X"}
         streamWriter.write('data: [DONE]\n\n');
 
       } catch (streamErr) {
-        // Re-throw to be caught by the outer catch block, satisfying TS parser
         throw streamErr;
       } finally {
         clearInterval(heartbeatInterval);
