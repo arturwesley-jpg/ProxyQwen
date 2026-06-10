@@ -874,6 +874,9 @@ WRONG:  {"name":"X"}
         }
         streamWriter.write('data: [DONE]\n\n');
 
+      } catch (streamErr) {
+        // Re-throw to be caught by the outer catch block, satisfying TS parser
+        throw streamErr;
       } finally {
         clearInterval(heartbeatInterval);
         removeStream(completionId);
