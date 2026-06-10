@@ -538,10 +538,10 @@ export async function createQwenStream(
   const response = await fetch(url, {
     method: 'POST',
     headers: headersToSend,
-    body: requestBody,
+    body: bodyToSend,
     signal: controller.signal,
     dispatcher: qwenAgent,
-    });
+  });
   clearTimeout(timeoutId);
 
   if (!response.ok || !response.body) {
