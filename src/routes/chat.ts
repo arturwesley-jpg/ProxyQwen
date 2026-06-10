@@ -138,9 +138,70 @@ function parseQwenErrorPayload(raw: string): { message: string; status: number }
 
 export async function chatCompletions(c: Context) {
   try {
+    // ============================================================
+    // TOOL NAME MAPPER: OpenClaude native tools -> Proxy tools
+    // Maps OpenClaude native tool names to proxy tool names
+    // ============================================================
+    const openClaudeToProxyToolMap: Record<string, string> = {
+      "Bash": "terminal",
+      "Read": "read_file",
+      "Write": "write_file",
+      "Glob": "search_files",
+      "Grep": "search_files",
+      "Edit": "edit_file",
+      "LS": "search_files",  // maps to listing files
+    };
+
+    // Reverse map for converting model responses back to OpenClaude names
+    const proxyToOpenClaudeToolMap: Record<string, string> = {};
+    for (const [openClaude, proxy] of Object.entries(openClaudeToProxyToolMap)) {
+      if (!proxyToOpenClaudeToolMap[proxy]) {
+        proxyToOpenClaudeToolMap[proxy] = openClaude;
+      }
+    }
+    // Ensure our native proxy tools also map back
+    proxyToOpenClaudeToolMap["terminal"] = "Bash";
+    proxyToOpenClaudeToolMap["read_file"] = "Read";
+    proxyToOpenClaudeToolMap["write_file"] = "Write";
+    proxyToOpenClaudeToolMap["search_files"] = "Glob";
+    proxyToOpenClaudeToolMap["edit_file"] = "Edit";
+    // ============================================================
+
     const body: OpenAIRequest = await c.req.json();
     const isStream = body.stream ?? false;
-    
+
+    // Transform incoming tool definitions: map OpenClaude names to proxy names
+    const bodyAny = body as any;
+    if (bodyAny.tools && Array.isArray(bodyAny.tools) && bodyAny.tools.length > 0) {
+      bodyAny.tools = bodyAny.tools.map((t: any) => {
+        if (t.type === "function" && t.function?.name) {
+          const originalName = t.function.name;
+          const mappedName = openClaudeToProxyToolMap[originalName];
+          if (mappedName && mappedName !== originalName) {
+            console.log("[ToolMapper] Mapping OpenClaude tool " + originalName + " -> proxy tool " + mappedName);
+            return {
+              ...t,
+              function: {
+                ...t.function,
+                name: mappedName
+              }
+            };
+          }
+        }
+        return t;
+      });
+    }
+
+    // Also map tool_choice if present
+    if (bodyAny.tool_choice && typeof bodyAny.tool_choice === "object" && bodyAny.tool_choice.function) {
+      const forcedTool = bodyAny.tool_choice.function.name;
+      const mappedForcedTool = openClaudeToProxyToolMap[forcedTool];
+      if (mappedForcedTool && mappedForcedTool !== forcedTool) {
+        bodyAny.tool_choice.function.name = mappedForcedTool;
+      }
+    }
+    // ============================================================
+
     // Extract the prompt
     let prompt = '';
     const messages = body.messages || [];
@@ -223,7 +284,6 @@ export async function chatCompletions(c: Context) {
     }
 
     // Inject tools instructions
-    const bodyAny = body as any;
     if (bodyAny.tools && Array.isArray(bodyAny.tools) && bodyAny.tools.length > 0) {
       // Better formatting for tools
       const formattedTools = bodyAny.tools.map((t: any) => {
