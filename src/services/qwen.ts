@@ -1,6 +1,12 @@
 import { getQwenHeaders, getBasicHeaders } from './playwright.js';
 import { MAX_PAYLOAD_SIZE } from '../core/model-registry.js';
+import { qwenAgent } from '../core/http-client.js';
 import crypto from 'crypto';
+import zlib from 'zlib';
+import { promisify } from 'util';
+
+const gzip = promisify(zlib.gzip);
+const GZIP_THRESHOLD = 10240; // 10KB
 
 const CACHED_TIMEZONE = new Date().toString().split(' (')[0];
 const BASE_TIMEOUT_MS = 120000;
@@ -114,6 +120,7 @@ async function createRealQwenChat(header: Record<string, string>): Promise<strin
       project_id: '',
     }),
     signal: AbortSignal.timeout(30000),
+    dispatcher: qwenAgent,
   });
 
   if (!response.ok) throw new Error(`Failed to create chat: ${response.status}`);
@@ -161,6 +168,13 @@ export async function getWarmedChat(accountId?: string) {
   let pool = warmPool.get(key);
   if (!pool) { pool = []; warmPool.set(key, pool); }
   cleanupStalePool(key);
+  
+  // Refill preditivo em background quando o pool cair abaixo de 20% (6 de 30)
+  // Isso evita picos de latência quando o pool esvazia completamente
+  if (pool.length <= 6 && !refillPromises.has(key)) {
+    refillPromises.set(key, refillPoolForAccount(key).finally(() => refillPromises.delete(key)));
+  }
+  
   if (pool.length === 0) {
     if (!refillPromises.has(key)) {
       refillPromises.set(key, refillPoolForAccount(key).finally(() => refillPromises.delete(key)));
@@ -273,8 +287,9 @@ export async function disableNativeTools(accountId?: string): Promise<void> {
         'bx-v': headers['bx-v']
       },
       body: JSON.stringify(payload),
-      signal: controller.signal
-    });
+      signal: controller.signal,
+      dispatcher: qwenAgent,
+      });
     clearTimeout(timeoutId);
 
     if (!response.ok) {
@@ -488,27 +503,45 @@ export async function createQwenStream(
   const url = `https://chat.qwen.ai/api/v2/chat/completions?chat_id=${chatId}`;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  // Compressão Gzip para payloads grandes (> 10KB)
+  let bodyToSend: string | Buffer = payloadJson;
+  const headersToSend: Record<string, string> = {
+    'accept': 'application/json',
+    'accept-language': 'pt-BR,pt;q=0.9',
+    'content-type': 'application/json',
+    'cookie': chatHeaders['cookie'],
+    'origin': 'https://chat.qwen.ai',
+    'referer': `https://chat.qwen.ai/c/${chatId}`,
+    'sec-fetch-dest': 'empty',
+    'sec-fetch-mode': 'cors',
+    'sec-fetch-site': 'same-origin',
+    'timezone': CACHED_TIMEZONE,
+    'user-agent': chatHeaders['user-agent'],
+    'x-accel-buffering': 'no',
+    'x-request-id': crypto.randomUUID(),
+    'bx-v': chatHeaders['bx-v'],
+  };
+
+  if (payloadSize > GZIP_THRESHOLD) {
+    try {
+      const compressed = await gzip(payloadJson);
+      bodyToSend = compressed;
+      headersToSend['content-encoding'] = 'gzip';
+      console.log(`[Qwen] Payload comprimido: ${payloadSize} bytes -> ${compressed.length} bytes (${((1 - compressed.length / payloadSize) * 100).toFixed(1)}% redução)`);
+    } catch (err: any) {
+      console.error(`[Qwen] Erro ao comprimir payload: ${err.message}, enviando sem compressão`);
+      bodyToSend = payloadJson;
+    }
+  }
+
   const response = await fetch(url, {
     method: 'POST',
-    headers: {
-      'accept': 'application/json',
-      'accept-language': 'pt-BR,pt;q=0.9',
-      'content-type': 'application/json',
-      'cookie': chatHeaders['cookie'],
-      'origin': 'https://chat.qwen.ai',
-      'referer': `https://chat.qwen.ai/c/${chatId}`,
-      'sec-fetch-dest': 'empty',
-      'sec-fetch-mode': 'cors',
-      'sec-fetch-site': 'same-origin',
-      'timezone': CACHED_TIMEZONE,
-      'user-agent': chatHeaders['user-agent'],
-      'x-accel-buffering': 'no',
-      'x-request-id': crypto.randomUUID(),
-      'bx-v': chatHeaders['bx-v'],
-    },
-    body: payloadJson,
-    signal: controller.signal
-  });
+    headers: headersToSend,
+    body: requestBody,
+    signal: controller.signal,
+    dispatcher: qwenAgent,
+    });
   clearTimeout(timeoutId);
 
   if (!response.ok || !response.body) {
