@@ -378,7 +378,7 @@ export async function createQwenStream(
   files?: QwenFileEntry[],
   pendingMultimodal?: Array<Array<{ type: string; text?: string; image_url?: { url: string }; video_url?: { url: string }; audio_url?: { url: string }; file_url?: { url: string } }>>,
   existingChatId?: string
-): Promise<{ stream: ReadableStream, headers: Record<string, string>, uiSessionId: string, controller: AbortController, accountId: string }> {
+): Promise<{ stream: ReadableStream, headers: Record<string, string>, uiSessionId: string, controller: AbortController, accountId: string, chatId: string }> {
   let chatId: string;
   let chatHeaders: Record<string, string>;
   
@@ -594,5 +594,5 @@ export async function createQwenStream(
     throw new Error(`Failed to fetch from Qwen: ${response.status} ${response.statusText} - ${errText}`);
   }
 
-  return { stream: response.body, headers: chatHeaders, uiSessionId: chatId, controller, accountId: accountId || 'global' };
+  return { stream: response.body, headers: chatHeaders, uiSessionId: chatId, controller, accountId: accountId || 'global', chatId };
 }
