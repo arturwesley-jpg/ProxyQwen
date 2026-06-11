@@ -23,3 +23,9 @@ accounts.config.json
 # OS files
 .DS_Store
 Thumbs.db
+
+# Runtime data (should never be committed)
+data/
+qwen_profiles/
+*.db-shm
+*.db-wal

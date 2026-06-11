@@ -2,7 +2,7 @@
 
 Proxy API local compatível com OpenAI que roteia requisições para os modelos do **Qwen (chat.qwen.ai)** via automação de navegador com Playwright. Suporte a múltiplas contas com rotação automática, execução de ferramentas, modo de pensamento (reasoning), persistência de sessão e armazenamento em SQLite.
 
-[![CI](https://github.com/pedrofariasx/qwenproxy/actions/workflows/ci.yml/badge.svg)](https://github.com/pedrofariasx/qwenproxy/actions/workflows/ci.yml)
+[![CI](https://github.com/arturwesley-jpg/ProxyQwen/actions/workflows/ci.yml/badge.svg)](https://github.com/arturwesley-jpg/ProxyQwen/actions/workflows/ci.yml)
 [![TypeScript](https://img.shields.io/badge/TypeScript-6.0-blue)](https://www.typescriptlang.org/)
 [![Hono](https://img.shields.io/badge/Hono-4.12-green)](https://hono.dev/)
 [![Playwright](https://img.shields.io/badge/Playwright-1.60-blueviolet)](https://playwright.dev/)
@@ -10,18 +10,18 @@ Proxy API local compatível com OpenAI que roteia requisições para os modelos 
 
 ---
 
-## Features
+## Funcionalidades
 
-- **OpenAI API Compatible** — Interface compatível com `/v1/chat/completions` e `/v1/models`.
-- **Multi-Account** — Gerencie múltiplas contas Qwen com rotação round-robin e cooldown automático.
-- **SQLite Storage** — Contas salvas em banco de dados SQLite (WAL mode) para performance e confiabilidade.
-- **Reasoning Support** — Suporte completo ao modo de pensamento (thinking) dos modelos Qwen.
-- **Tool Execution** — Sistema de execução de ferramentas locais integrado ao fluxo do chat.
-- **Session Persistence** — Perfil de navegador persistente por conta em `qwen_profiles/`.
+- **API Compatível com OpenAI** — Interface compatível com `/v1/chat/completions` e `/v1/models`.
+- **Multi-Conta** — Gerencie múltiplas contas Qwen com rotação round-robin e cooldown automático.
+- **Armazenamento SQLite** — Contas salvas em banco de dados SQLite (modo WAL) para performance e confiabilidade.
+- **Suporte a Reasoning** — Suporte completo ao modo de pensamento (thinking) dos modelos Qwen.
+- **Execução de Ferramentas** — Sistema de execução de ferramentas locais integrado ao fluxo do chat.
+- **Persistência de Sessão** — Perfil de navegador persistente por conta em `qwen_profiles/`.
 - **Auto-Login** — Login automático via credenciais com recuperação de sessão.
-- **Browser Selection** — Escolha entre Chromium, Chrome, Firefox, Edge ou WebKit.
-- **Monitoring** — Health check, métricas Prometheus e watchdog integrados.
-- **Docker Ready** — Deploy para VPS com Docker, volumes persistentes e graceful shutdown.
+- **Seleção de Navegador** — Escolha entre Chromium, Chrome, Firefox, Edge ou WebKit.
+- **Monitoramento** — Health check, métricas Prometheus e watchdog integrados.
+- **Pronto para Docker** — Deploy para VPS com Docker, volumes persistentes e graceful shutdown.
 
 ---
 
@@ -65,8 +65,8 @@ graph TD
 ### Via npm
 
 ```bash
-git clone https://github.com/pedrofariasx/qwenproxy.git
-cd qwenproxy
+git clone https://github.com/arturwesley-jpg/ProxyQwen.git
+cd ProxyQwen
 npm install
 npx playwright install
 ```
@@ -157,7 +157,7 @@ import OpenAI from 'openai';
 
 const openai = new OpenAI({
   baseURL: 'http://localhost:3000/v1',
-  apiKey: process.env.API_KEY || 'sk-no-key-required'
+  apiKey: process.env.API_KEY || 'sua-chave-aqui'
 });
 
 const completion = await openai.chat.completions.create({
@@ -173,10 +173,10 @@ console.log(completion.choices[0].message.content);
 ```bash
 curl http://localhost:3000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer sua-chave" \
+  -H "Authorization: Bearer *** \
   -d '{
     "model": "qwen-plus",
-    "messages": [{"role": "user", "content": "Hello!"}],
+    "messages": [{"role": "user", "content": "Olá!"}],
     "stream": true
   }'
 ```
@@ -197,7 +197,7 @@ services:
     env_file:
       - .env
     volumes:
-      - ./data:/app/data               # Banco SQLite
+      - ./data:/app/data                    # Banco SQLite
       - ./qwen_profiles:/app/qwen_profiles  # Sessões dos navegadores
     restart: unless-stopped
 ```
@@ -214,7 +214,7 @@ services:
 ## Estrutura do Projeto
 
 ```
-qwenproxy/
+ProxyQwen/
 ├── src/
 │   ├── index.ts                 # Entry point
 │   ├── login.ts                 # CLI de gerenciamento de contas
@@ -241,42 +241,4 @@ qwenproxy/
 │   │   └── qwen.ts              # Integração com API do Qwen
 │   ├── tests/                   # Testes automatizados
 │   ├── tools/
-│   │   ├── parser.ts            # Parser de <tool_call> tags
-│   │   ├── registry.ts          # Registro de tools
-│   │   ├── schema.ts            # Validação JSON Schema
-│   │   └── types.ts             # Tipos do sistema de tools
-│   └── utils/
-│       ├── context-truncation.ts # Truncamento de contexto
-│       ├── json.ts              # Parser JSON robusto
-│       └── types.ts             # Re-exports de tipos
-├── data/                        # Banco SQLite (gitignored)
-├── qwen_profiles/               # Perfis de navegador por conta (gitignored)
-├── Dockerfile
-├── docker-compose.yml
-└── package.json
-```
-
----
-
-## Troubleshooting
-
-| Problema | Solução |
-|----------|---------|
-| Porta em uso | Altere `PORT` no `.env` ou encerre o processo na porta 3000 |
-| Navegador não abre | Execute `npx playwright install` |
-| Sessão expirada | Execute `npm run login` para renovar cookies |
-| Rate limit em todas as contas | Adicione mais contas via `npm run login` |
-| Banco corrompido | Apague `data/qwenproxy.db` e re-adicione as contas |
-
----
-
-## Disclaimer
-
-> Este projeto é fornecido estritamente para fins educacionais e de pesquisa.
-
-Os autores não incentivam ou endossam:
-- Violação dos Termos de Serviço da plataforma Qwen.
-- Automação não autorizada em larga escala.
-- Uso para atividades maliciosas.
-
-**Use por sua conta e risco.**
+│   │   ├── parser.ts            # Parser de tags 

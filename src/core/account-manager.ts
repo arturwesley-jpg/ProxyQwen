@@ -75,17 +75,9 @@ export function getNextAccount(forceReset?: boolean): QwenAccount | null {
     }
   }
 
-  // All accounts on cooldown — return the one with the shortest remaining cooldown
-  let best: QwenAccount | null = null
-  let bestRemaining = Infinity
-  for (const account of accounts) {
-    const info = getAccountCooldownInfo(account.id)
-    if (info && info.remainingMs < bestRemaining) {
-      bestRemaining = info.remainingMs
-      best = account
-    }
-  }
-  return best
+  // All accounts on cooldown — return null to force caller to handle "no accounts available"
+  console.warn(`[AccountManager] ALL accounts on cooldown. Returning null.`);
+  return null;
 }
 
 export function getNextAvailableAccount(skipAccountId?: string): QwenAccount | null {
@@ -102,18 +94,9 @@ export function getNextAvailableAccount(skipAccountId?: string): QwenAccount | n
     }
   }
 
-  // All remaining accounts on cooldown — return the one with shortest cooldown
-  let best: QwenAccount | null = null
-  let bestRemaining = Infinity
-  for (const account of accounts) {
-    if (skipAccountId && account.id === skipAccountId) continue
-    const info = getAccountCooldownInfo(account.id)
-    if (info && info.remainingMs < bestRemaining) {
-      bestRemaining = info.remainingMs
-      best = account
-    }
-  }
-  return best
+  // All remaining accounts on cooldown — return null to force caller to handle "no accounts available"
+  console.warn(`[AccountManager] ALL remaining accounts on cooldown. Returning null.`);
+  return null;
 }
 
 export function getAccountCount(): number {

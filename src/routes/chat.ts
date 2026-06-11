@@ -20,7 +20,7 @@ import { StreamingToolParser } from '../tools/parser.js';
 import { QwenStreamParser, ParsedChunkResult } from '../utils/qwen-stream-parser.js';
 import { getModelContextWindow } from '../core/model-registry.js'
 import { truncateMessages, estimateTokenCount } from '../utils/context-truncation.js';
-import { getNextAccount, getNextAvailableAccount, markAccountRateLimited, getAccountCooldownInfo } from '../core/account-manager.js';
+import { getNextAccount, getNextAvailableAccount, markAccountRateLimited, getAccountCooldownInfo, getAccountCount } from '../core/account-manager.js';
 import { registerStream, removeStream, getStream } from '../core/stream-registry.js';
 import { metrics } from '../core/metrics.js'
 import { getSession, createSession, updateSession } from '../core/session-manager.js'
@@ -575,6 +575,8 @@ WRONG:  {"name":"X"}
     }
 
     // === SESSION PERSISTENCE ===
+    // Include X-Account-Id in session key to isolate different subagents with same prompt
+    const accountSuffix = requestedAccountId ? `:${requestedAccountId}` : '';
     const conversationId = (bodyAny as any).conversation_id || 
       (bodyAny as any).metadata?.conversation_id ||
       (() => {
@@ -582,7 +584,7 @@ WRONG:  {"name":"X"}
           const c = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
           return `${m.role}:${c.slice(0, 100)}`;
         }).join('|');
-        return 'auto-' + crypto.createHash('md5').update(firstMsgs).digest('hex').slice(0, 16);
+        return 'auto-' + crypto.createHash('md5').update(firstMsgs + accountSuffix).digest('hex').slice(0, 16);
       })();
 
     // ============================================================
@@ -621,90 +623,98 @@ WRONG:  {"name":"X"}
       console.log(`[Chat] Reusing session: ${conversationId} -> chat ${forcedChatId}`);
     }
 
-    // S1: If X-Account-Id is pinned, force that specific account
     let account: any;
-    if (requestedAccountId) {
-      account = { id: requestedAccountId, email: `pinned-${requestedAccountId}` };
-    } else if (forcedAccountId) {
-      account = { id: forcedAccountId, email: 'session-account' };
-    } else {
-      account = getNextAccount();
-    }
-    const triedAccountIds = new Set<string>();
+    let triedAccountIds = new Set<string>();
     let lastError: any = null;
+    let acquiredLock: { release: () => void; accountId: string } | null = null;
 
     let stream: ReadableStream | undefined;
     let uiSessionId = '';
     const completionId = 'chatcmpl-' + crypto.randomUUID();
 
-    // S2: Track the acquired lock so we can release it on stream completion
-    let acquiredLock: { release: () => void; accountId: string } | null = null;
-
-    while (account) {
-      const accountId = account.id;
-      const accountEmail = account.email;
-
-      if (triedAccountIds.has(accountId)) {
-        account = getNextAvailableAccount(accountId);
-        continue;
-      }
-      triedAccountIds.add(accountId);
-
-      const cooldownInfo = getAccountCooldownInfo(accountId);
-      if (cooldownInfo && accountId !== 'global') {
-        console.log(`[Chat] Skipping account ${accountEmail} (${accountId}) — on cooldown for ${Math.round(cooldownInfo.remainingMs / 1000)}s (${cooldownInfo.reason})`);
-        account = getNextAvailableAccount(accountId);
-        continue;
-      }
-
-      // ============================================================
-      // S2: ACQUIRE ACCOUNT LOCK — prevent concurrent use
-      // If account is locked by another request, try the next one.
-      // If X-Account-Id was pinned and locked, wait with timeout.
-      // ============================================================
-      // S2 timeout configurável via LOCK_TIMEOUT_MS (default 30s para pinned)
-      // Pinned accounts aguardam (podem ser subagentes esperando slot).
-      // Rotating (sem X-Account-Id) falha rápido e tenta próxima conta.
-      const lockTimeoutMs = requestedAccountId
-        ? parseInt(process.env.LOCK_TIMEOUT_MS || '30000', 10)
-        : 0;
-      const lock = await acquireAccountLock(accountId, `${agentId}:${requestId}`, lockTimeoutMs);
-      if (!lock) {
+    // ============================================================
+    // MAIN ACCOUNT SELECTION LOOP — wrapped in try/finally for guaranteed lock release
+    // ============================================================
+    try {
+      while (true) {
+        // S1: If X-Account-Id is pinned, force that specific account (recreated each iteration for rotation)
         if (requestedAccountId) {
-          // Pinned account is busy even after waiting — hard fail
-          const info = getLockInfo(accountId);
-          console.warn(`[Chat] Pinned account ${accountId} still busy after ${lockTimeoutMs}ms (held by ${info.owner}, ${info.waiters} waiters)`);
-          return c.json({
-            error: `Account ${accountId} is busy (held by ${info.owner}). Try again later or use a different account.`
-          }, 429);
+          if (triedAccountIds.has(requestedAccountId)) {
+            account = getNextAvailableAccount(requestedAccountId);
+          } else {
+            account = { id: requestedAccountId, email: `pinned-${requestedAccountId}` };
+          }
+        } else if (forcedAccountId) {
+          account = { id: forcedAccountId, email: 'session-account' };
+        } else {
+          account = getNextAccount();
         }
-        // Rotating: try next account
-        console.log(`[Chat] Account ${accountEmail} (${accountId}) is locked by another request, trying next...`);
-        account = getNextAvailableAccount(accountId);
-        continue;
-      }
 
-      console.log(`[Chat] Routing request to account: ${accountEmail} (${accountId}) [locked by ${agentId}]`);
+        if (!account) {
+          // All accounts exhausted
+          break;
+        }
 
-      // Store lock reference so we can release it after stream completes
-      acquiredLock = { release: lock.release, accountId };
+        const accountId = account.id;
+        const accountEmail = account.email;
 
-      let retries = 3;
-      let retryDelay = 500;
-      let success = false;
+        const cooldownInfo = getAccountCooldownInfo(accountId);
+        if (cooldownInfo && accountId !== 'global') {
+          console.log(`[Chat] Skipping account ${accountEmail} (${accountId}) — on cooldown for ${Math.round(cooldownInfo.remainingMs / 1000)}s (${cooldownInfo.reason})`);
+          triedAccountIds.add(accountId);
+          account = getNextAvailableAccount(accountId);
+          continue;
+        }
 
-      while (retries > 0) {
-        try {
-          const result = await createQwenStream(
-            finalPrompt,
-            isThinkingModel,
-            body.model,
-            null,
-            accountId === 'global' ? undefined : accountId,
-            undefined,
-            pendingMultimodal.length > 0 ? pendingMultimodal : undefined,
-            useExistingChat ? forcedChatId : undefined
-          );
+        // ============================================================
+        // S2: ACQUIRE ACCOUNT LOCK — prevent concurrent use
+        // If account is locked by another request, try the next one.
+        // If X-Account-Id was pinned and locked, wait with timeout then ROTATE (not hard fail).
+        // ============================================================
+        // S2 timeout configurável via LOCK_TIMEOUT_MS (default 30s para pinned)
+        // Pinned accounts aguardam (podem ser subagentes esperando slot), depois rotacionam.
+        // Rotating (sem X-Account-Id) falha rápido e tenta próxima conta.
+        const lockTimeoutMs = requestedAccountId
+          ? parseInt(process.env.LOCK_TIMEOUT_MS || '30000', 10)
+          : 0;
+        const lock = await acquireAccountLock(accountId, `${agentId}:${requestId}`, lockTimeoutMs);
+        if (!lock) {
+          if (requestedAccountId) {
+            // Pinned account is busy even after waiting — ROTATE to next account (not hard fail)
+            const info = getLockInfo(accountId);
+            console.warn(`[Chat] Pinned account ${accountId} still busy after ${lockTimeoutMs}ms (held by ${info.owner}, ${info.waiters} waiters) — rotating`);
+            triedAccountIds.add(accountId);
+            account = getNextAvailableAccount(accountId);
+            continue;
+          }
+          // Rotating: try next account
+          console.log(`[Chat] Account ${accountEmail} (${accountId}) is locked by another request, trying next...`);
+          triedAccountIds.add(accountId);
+          account = getNextAvailableAccount(accountId);
+          continue;
+        }
+
+        console.log(`[Chat] Routing request to account: ${accountEmail} (${accountId}) [locked by ${agentId}]`);
+
+        // Store lock reference so we can release it after stream completes
+        acquiredLock = { release: lock.release, accountId };
+
+        let retries = 3;
+        let retryDelay = 500;
+        let success = false;
+
+        while (retries > 0) {
+          try {
+            const result = await createQwenStream(
+              finalPrompt,
+              isThinkingModel,
+              body.model,
+              null,
+              accountId === 'global' ? undefined : accountId,
+              undefined,
+              pendingMultimodal.length > 0 ? pendingMultimodal : undefined,
+              useExistingChat ? forcedChatId : undefined
+            );
             stream = result.stream;
             uiSessionId = result.uiSessionId;
             registerStream(completionId, {
@@ -723,70 +733,97 @@ WRONG:  {"name":"X"}
             
             success = true;
             break;
-        } catch (err: any) {
-          retries--;
+          } catch (err: any) {
+            retries--;
 
-          if (err.upstreamCode === 'RateLimited' || err.upstreamStatus === 429) {
-            const hourHint = err.message?.match(/Wait about (\d+) hour/);
-            const cooldownMs = hourHint ? parseInt(hourHint[1]) * 60 * 60 * 1000 : undefined;
-            markAccountRateLimited(accountId, cooldownMs, 'RateLimited');
-            console.warn(`[Chat] Account ${accountEmail} (${accountId}) rate-limited.`);
-            lastError = err;
-            if (useExistingChat) {
-              console.log(`[Chat] Session failed, falling back to new session`);
-              useExistingChat = false;
-              forcedChatId = undefined;
-              forcedAccountId = undefined;
+            if (err.upstreamCode === 'RateLimited' || err.upstreamStatus === 429) {
+              // Robust regex: /Wait about (\d+)\s*hour/ + default 19h (not 3 min)
+              const hourHint = err.message?.match(/Wait about (\d+)\s*hour/i);
+              const cooldownMs = hourHint ? parseInt(hourHint[1]) * 60 * 60 * 1000 : 19 * 60 * 60 * 1000;
+              markAccountRateLimited(accountId, cooldownMs, 'RateLimited');
+              console.warn(`[Chat] Account ${accountEmail} (${accountId}) rate-limited (cooldown: ${cooldownMs / 3600000}h).`);
+              lastError = err;
+              if (useExistingChat) {
+                console.log(`[Chat] Session failed, falling back to new session`);
+                useExistingChat = false;
+                forcedChatId = undefined;
+                forcedAccountId = undefined;
+                triedAccountIds.add(accountId);
+                account = getNextAvailableAccount(accountId);
+                retries = 3;
+                continue;
+              }
+              // ROTATE IMMEDIATELY to next account on RateLimited (before break)
+              triedAccountIds.add(accountId);
               account = getNextAvailableAccount(accountId);
-              retries = 3;
-              continue;
+              break;
             }
-            break;
-          }
 
-          if (retries === 0) {
-            if (err.upstreamStatus && err.upstreamStatus >= 500) {
-              markAccountRateLimited(accountId, undefined, 'ServerError');
-              console.warn(`[Chat] Account ${accountEmail} (${accountId}) returned server error.`);
+            if (retries === 0) {
+              if (err.upstreamStatus && err.upstreamStatus >= 500) {
+                markAccountRateLimited(accountId, undefined, 'ServerError');
+                console.warn(`[Chat] Account ${accountEmail} (${accountId}) returned server error.`);
+              }
+              lastError = err;
+              if (useExistingChat) {
+                console.log(`[Chat] Session failed, falling back to new session`);
+                useExistingChat = false;
+                forcedChatId = undefined;
+                forcedAccountId = undefined;
+                triedAccountIds.add(accountId);
+                account = getNextAvailableAccount(accountId);
+                retries = 3;
+                continue;
+              }
+              break;
             }
-            lastError = err;
-            if (useExistingChat) {
-              console.log(`[Chat] Session failed, falling back to new session`);
-              useExistingChat = false;
-              forcedChatId = undefined;
-              forcedAccountId = undefined;
-              account = getNextAvailableAccount(accountId);
-              retries = 3;
-              continue;
-            }
-            break;
-          }
 
-          let useDelay = retryDelay;
-          if (err instanceof RetryableQwenStreamError && err.retryAfterMs !== undefined) {
-            useDelay = err.retryAfterMs;
+            let useDelay = retryDelay;
+            if (err instanceof RetryableQwenStreamError && err.retryAfterMs !== undefined) {
+              useDelay = err.retryAfterMs;
+            }
+            const isRetryable = err instanceof RetryableQwenStreamError || err.message?.includes('in progress') || err.message?.includes('Bad_Request');
+            if (!isRetryable) {
+              lastError = err;
+              break;
+            }
+            console.warn(`[Chat] Qwen request failed for ${accountEmail}, retrying in ${useDelay}ms... (${retries} left)`);
+            await new Promise(r => setTimeout(r, useDelay));
+            retryDelay = Math.min(retryDelay * 2, 5000);
           }
-          const isRetryable = err instanceof RetryableQwenStreamError || err.message?.includes('in progress') || err.message?.includes('Bad_Request');
-          if (!isRetryable) {
-            lastError = err;
-            break;
-          }
-          console.warn(`[Chat] Qwen request failed for ${accountEmail}, retrying in ${useDelay}ms... (${retries} left)`);
-          await new Promise(r => setTimeout(r, useDelay));
-          retryDelay = Math.min(retryDelay * 2, 5000);
         }
-      }
 
-      if (success) {
-        break;
-      }
+        if (success) {
+          break;
+        }
 
-      account = getNextAvailableAccount(accountId);
+        if (stream) {
+          // We had a stream but it failed, try next account
+          account = getNextAvailableAccount(accountId);
+        } else if (!triedAccountIds.has(accountId)) {
+          // No stream and we haven't tried this account yet, try next
+          account = getNextAvailableAccount(accountId);
+        }
+        
+        // Check if we've exhausted all accounts
+        const totalAccounts = getAccountCount();
+        if (triedAccountIds.size >= totalAccounts) {
+          console.warn(`[Chat] All ${totalAccounts} accounts exhausted (tried: ${triedAccountIds.size})`);
+          break;
+        }
+        // If we already tried this account and no stream, loop will continue and pick next
+      }
+    } finally {
+      // Lock is released in specific paths (lines below), but TypeScript requires finally
     }
 
     if (!stream) {
       removeStream(completionId);
-      // S2: Release lock if we acquired one but failed to get a stream
+      // If all accounts exhausted (account === null), return honest 429
+      if (lastError?.upstreamCode === 'RateLimited' || lastError?.upstreamStatus === 429) {
+        return c.json({ error: { message: 'All accounts rate limited. Please try again later.' } }, 429);
+      }
+      // Release lock on error during account selection
       if (acquiredLock) {
         acquiredLock.release();
         acquiredLock = null;

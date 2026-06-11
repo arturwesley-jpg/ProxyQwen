@@ -77,6 +77,22 @@ const warmPool: Map<string, WarmPoolEntry[]> = new Map();
 
 const refillPromises: Map<string, Promise<void>> = new Map();
 
+// Mutex for atomic warm pool pop+refill per account
+const warmPoolMutex: Map<string, Promise<void>> = new Map();
+
+function getWarmPoolMutex(key: string): Promise<void> {
+  let mutex = warmPoolMutex.get(key);
+  if (!mutex) {
+    mutex = Promise.resolve();
+    warmPoolMutex.set(key, mutex);
+  }
+  return mutex;
+}
+
+function setWarmPoolMutex(key: string, p: Promise<void>) {
+  warmPoolMutex.set(key, p);
+}
+
 const WARM_POOL_SIZE = 30; // Aumentado para reduzir overhead de criação de sessão
 const WARM_POOL_TTL_MS = 60 * 60 * 1000; // Aumentado: 60 minutos
 
@@ -168,29 +184,43 @@ export async function getWarmedChat(accountId?: string) {
   let pool = warmPool.get(key);
   if (!pool) { pool = []; warmPool.set(key, pool); }
   cleanupStalePool(key);
-  
-  // Refill preditivo em background quando o pool cair abaixo de 20% (6 de 30)
-  // Isso evita picos de latência quando o pool esvazia completamente
-  if (pool.length <= 6 && !refillPromises.has(key)) {
-    refillPromises.set(key, refillPoolForAccount(key).finally(() => refillPromises.delete(key)));
-  }
-  
-  if (pool.length === 0) {
-    if (!refillPromises.has(key)) {
-      refillPromises.set(key, refillPoolForAccount(key).finally(() => refillPromises.delete(key)));
+
+  // MUTEX: serialize pop+refill to prevent race condition where concurrent requests get same chatId
+  const mutex = getWarmPoolMutex(key);
+  let result: WarmPoolEntry | null = null;
+
+  await mutex.then(async () => {
+    // Re-check pool after acquiring mutex (another request may have popped)
+    if (pool.length === 0) {
+      // Predictive refill when pool <= 6 (20% of 30)
+      if (pool.length <= 6 && !refillPromises.has(key)) {
+        refillPromises.set(key, refillPoolForAccount(key).finally(() => refillPromises.delete(key)));
+      }
+
+      // Ensure refill is running
+      if (!refillPromises.has(key)) {
+        refillPromises.set(key, refillPoolForAccount(key).finally(() => refillPromises.delete(key)));
+      }
+      await refillPromises.get(key);
+
+      if (pool.length === 0) {
+        // Retry once with short backoff
+        await new Promise(r => setTimeout(r, 1000));
+        if (!refillPromises.has(key)) {
+          refillPromises.set(key, refillPoolForAccount(key).finally(() => refillPromises.delete(key)));
+        }
+        await refillPromises.get(key);
+      }
     }
-    await refillPromises.get(key);
-  }
-  if (pool.length === 0) {
-    // Retry once with short backoff if pool is still empty after first refill attempt
-    await new Promise(r => setTimeout(r, 1000));
-    if (!refillPromises.has(key)) {
-      refillPromises.set(key, refillPoolForAccount(key).finally(() => refillPromises.delete(key)));
-    }
-    await refillPromises.get(key);
-  }
-  if (pool.length === 0) throw new Error(`Warm pool empty after retry for ${key}`);
-  return pool.shift()!;
+
+    if (pool.length === 0) throw new Error(`Warm pool empty after retry for ${key}`);
+    result = pool.shift()!;
+  });
+
+  // Update mutex with a resolved promise for next caller
+  setWarmPoolMutex(key, Promise.resolve());
+
+  return result!;
 }
 
 export async function warmAllPools(accountIds: string[]) {

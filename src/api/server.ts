@@ -41,9 +41,11 @@ app.use('*', compress({
 }))
 
 app.use('*', async (c, next) => {
+  console.log('[Debug] Request START:', c.req.method, c.req.path)
   metrics.increment('requests.total')
   const start = Date.now()
   await next()
+  console.log('[Debug] Request END:', c.req.method, c.req.path, '->', c.res?.status)
   const duration = Date.now() - start
   metrics.histogram('latency.request', duration)
   c.header('X-Response-Time', `${duration}ms`)
@@ -51,12 +53,15 @@ app.use('*', async (c, next) => {
 
 app.use('/v1/*', async (c, next) => {
   const apiKey = process.env.API_KEY || config.apiKey
+  console.log('[Auth] Expected API_KEY:', apiKey ? `${apiKey.slice(0, 8)}...` : 'empty')
   if (apiKey) {
     const auth = c.req.header('Authorization')
+    console.log('[Auth] Received Authorization header:', auth ? `${auth.slice(0, 20)}...` : 'none')
     if (!auth?.startsWith('Bearer ')) {
       return c.json({ error: 'Missing or invalid Authorization header' }, 401)
     }
     const token = auth.slice(7)
+    console.log('[Auth] Comparing token:', token ? `${token.slice(0, 8)}...` : 'empty', 'vs expected:', apiKey.slice(0, 8) + '...')
     if (token !== apiKey) {
       return c.json({ error: 'Invalid API key' }, 401)
     }
