@@ -369,6 +369,27 @@ export interface QwenFileEntry {
   [key: string]: any;
 }
 
+
+/**
+ * Retorna snapshot do warm pool (contagem por conta) — usado pelo endpoint /v1/warm-pool/status
+ */
+export function getWarmPoolSnapshot(): Record<string, { size: number; oldestMs: number | null }> {
+  const result: Record<string, { size: number; oldestMs: number | null }> = {};
+  const now = Date.now();
+  for (const [accountId, entries] of warmPool.entries()) {
+    if (entries.length === 0) {
+      result[accountId] = { size: 0, oldestMs: null };
+    } else {
+      const oldest = Math.min(...entries.map(e => e.timestamp));
+      result[accountId] = {
+        size: entries.length,
+        oldestMs: now - oldest,
+      };
+    }
+  }
+  return result;
+}
+
 export async function createQwenStream(
   prompt: string,
   enableThinking: boolean,

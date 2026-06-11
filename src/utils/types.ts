@@ -32,7 +32,7 @@ export interface MessageToolCall {
 
 export interface Message {
   role: string;
-  content: string | null;
+  content: string | Array<{ type: string; text?: string; image_url?: { url: string }; video_url?: { url: string }; audio_url?: { url: string }; file_url?: { url: string } }> | null;
   /** Present on assistant messages that invoked tools */
   tool_calls?: MessageToolCall[];
   /** Present on tool/function response messages to link back to a call */

@@ -48,6 +48,12 @@ export class Metrics extends EventEmitter {
       ['watchdog.recovery.triggered', 'counter', 'Recovery attempts triggered'],
       ['watchdog.recovery.success', 'counter', 'Successful recoveries'],
       ['watchdog.recovery.failed', 'counter', 'Failed recoveries'],
+      ['locks.active', 'gauge', 'Currently held account locks'],
+      ['locks.waiters', 'gauge', 'Requests waiting for a lock'],
+      ['locks.acquires_total', 'gauge', 'Total lock acquire attempts'],
+      ['locks.contended_total', 'gauge', 'Lock acquires that found the account busy'],
+      ['locks.timeouts_total', 'gauge', 'Lock acquires that timed out'],
+      ['locks.contention_rate_per_mille', 'gauge', 'Contention rate * 1000 (0-1000)'],
     ]
 
     for (const [name, type, help] of defaults) {

@@ -12,7 +12,7 @@ import { Context } from 'hono';
 import { stream as honoStream } from 'hono/streaming';
 import crypto from 'crypto';
 import { createQwenStream, updateSessionParent, RetryableQwenStreamError } from '../services/qwen.js';
-import { OpenAIRequest, ChoiceDelta, Message } from '../utils/types.js';
+import { OpenAIRequest, ChoiceDelta, Message, MessageToolCall } from '../utils/types.js';
 import { registry } from '../tools/registry.js';
 import type { FunctionToolDefinition } from '../tools/types.js';
 import { robustParseJSON } from '../utils/json.js';
@@ -24,6 +24,171 @@ import { getNextAccount, getNextAvailableAccount, markAccountRateLimited, getAcc
 import { registerStream, removeStream, getStream } from '../core/stream-registry.js';
 import { metrics } from '../core/metrics.js'
 import { getSession, createSession, updateSession } from '../core/session-manager.js'
+
+// ============================================================
+// NEW MODULES (Roadmap 2026)
+// ============================================================
+import { semanticCache } from '../cache/semantic-cache.js';
+import { countTokens } from '../utils/token-estimation.js';
+import { extractFeatures, routeModel } from '../core/model-router.js';
+import { needsSummarization, summarizeConversation } from '../utils/context-summarizer.js';
+import { authenticateTenant, canMakeRequest, isModelAllowed, recordRequest, incrementStreams, decrementStreams } from '../core/multi-tenant.js';
+import { startTrace, endTrace, addTag, log as traceLog } from '../core/opentelemetry.js';
+import { acquireAccountLock, getLockInfo, isAccountLocked } from '../core/account-lock.js';
+
+// ============================================================
+// AUTO-SPLIT HELPERS FOR MULTI-PROMPT (>4 tool calls)
+// ============================================================
+
+function countToolCallsInMessages(messages: Message[]): number {
+  let count = 0;
+  for (const msg of messages) {
+    if (msg.role === 'assistant' && msg.tool_calls && Array.isArray(msg.tool_calls)) {
+      count += msg.tool_calls.length;
+    }
+  }
+  return count;
+}
+
+interface MessageSegment {
+  systemPrompt: string;
+  messages: Message[];
+}
+
+function splitMessagesByToolCallLimit(
+  messages: Message[],
+  maxToolCalls: number
+): MessageSegment[] {
+  const segments: MessageSegment[] = [];
+  let currentSegment: Message[] = [];
+  let currentToolCallCount = 0;
+  
+  const systemMessages: Message[] = [];
+  const nonSystemMessages: Message[] = [];
+  
+  for (const msg of messages) {
+    if (msg.role === 'system') {
+      systemMessages.push(msg);
+    } else {
+      nonSystemMessages.push(msg);
+    }
+  }
+  
+  const systemPromptText = systemMessages.map(m => {
+    if (typeof m.content === 'string') return m.content;
+    if (Array.isArray(m.content)) {
+      return m.content.filter((p: any) => p.type === 'text').map((p: any) => p.text || '').join('\n');
+    }
+    return JSON.stringify(m.content);
+  }).join('\n\n');
+  
+  for (const msg of nonSystemMessages) {
+    const toolCallsInMsg = msg.role === 'assistant' && msg.tool_calls 
+      ? msg.tool_calls.length 
+      : 0;
+    
+    if (currentToolCallCount + toolCallsInMsg > maxToolCalls && currentSegment.length > 0) {
+      segments.push({
+        systemPrompt: systemPromptText,
+        messages: [...currentSegment]
+      });
+      currentSegment = [msg];
+      currentToolCallCount = toolCallsInMsg;
+    } else {
+      currentSegment.push(msg);
+      currentToolCallCount += toolCallsInMsg;
+    }
+  }
+  
+  if (currentSegment.length > 0) {
+    segments.push({
+      systemPrompt: systemPromptText,
+      messages: [...currentSegment]
+    });
+  }
+  
+  return segments;
+}
+
+async function callQwenAndGetFullResponse(
+  prompt: string,
+  isThinkingModel: boolean,
+  model: string,
+  accountId?: string,
+  chatId?: string
+): Promise<{ content: string; tool_calls?: any[]; reasoning_content?: string }> {
+  const result = await createQwenStream(
+    prompt,
+    isThinkingModel,
+    model,
+    null,
+    accountId,
+    undefined,
+    undefined,
+    chatId
+  );
+  
+  let fullContent = '';
+  let reasoningContent = '';
+  let toolCalls: any[] = [];
+  const reader = result.stream.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith('data: ')) continue;
+        
+        const dataStr = trimmed.slice(6);
+        if (dataStr === '[DONE]') continue;
+        
+        try {
+          const parsed = JSON.parse(dataStr);
+          if (parsed.choices?.[0]?.delta) {
+            const delta = parsed.choices[0].delta;
+            if (delta.content) {
+              fullContent += delta.content;
+            }
+            if (delta.reasoning_content) {
+              reasoningContent += delta.reasoning_content;
+            }
+            if (delta.tool_calls && Array.isArray(delta.tool_calls)) {
+              for (const tc of delta.tool_calls) {
+                if (tc.function?.name && tc.function?.arguments) {
+                  toolCalls.push({
+                    id: tc.id || `tc-${Date.now()}-${toolCalls.length}`,
+                    type: 'function',
+                    function: {
+                      name: tc.function.name,
+                      arguments: tc.function.arguments
+                    }
+                  });
+                }
+              }
+            }
+          }
+        } catch {}
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  
+  return { 
+    content: fullContent, 
+    tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
+    reasoning_content: reasoningContent || undefined
+  };
+}
 
 export interface DeltaResult {
   delta: string;
@@ -170,6 +335,40 @@ export async function chatCompletions(c: Context) {
     const body: OpenAIRequest = await c.req.json();
     const isStream = body.stream ?? false;
 
+    // ============================================================
+    // S1: X-Account-Id HEADER — Pin request to a specific account
+    // Used by multi-agent setups (e.g. Hermes custom_providers) to
+    // ensure each subagent uses a dedicated account, avoiding the
+    // "chat is in progress" upstream serialization.
+    // ============================================================
+    const requestedAccountId = c.req.header('X-Account-Id') || c.req.header('x-account-id') || undefined;
+    const agentId = c.req.header('X-Agent-Id') || c.req.header('x-agent-id') || 'default';
+    if (requestedAccountId) {
+      console.log(`[Chat] X-Account-Id pinned: ${requestedAccountId} (agent=${agentId})`);
+    }
+
+    // ============================================================
+    // MULTI-TENANT AUTH + REQUEST TRACKING
+    // ============================================================
+    const requestStartTime = Date.now();
+    const requestId = crypto.randomUUID();
+    let tenant: ReturnType<typeof authenticateTenant> = null;
+    if (process.env.MULTI_TENANT_ENABLED === 'true') {
+      const apiKey = c.req.header('Authorization')?.replace('Bearer ', '') || '';
+      tenant = authenticateTenant(apiKey);
+      if (!tenant) {
+        return c.json({ error: 'Invalid or missing tenant API key' }, 401);
+      }
+      const canReq = canMakeRequest(tenant);
+      if (!canReq.allowed) {
+        return c.json({ error: canReq.reason }, 429);
+      }
+      if (!isModelAllowed(tenant, body.model)) {
+        return c.json({ error: `Model ${body.model} not allowed for this tenant` }, 403);
+      }
+      incrementStreams(tenant.id);
+    }
+
     // Transform incoming tool definitions: map OpenClaude names to proxy names
     const bodyAny = body as any;
     if (bodyAny.tools && Array.isArray(bodyAny.tools) && bodyAny.tools.length > 0) {
@@ -308,8 +507,24 @@ export async function chatCompletions(c: Context) {
 
     const modelId = body.model.replace('-no-thinking', '');
     const modelContextWindow = getModelContextWindow(modelId)
-    const estimatedTokens = estimateTokenCount(systemPrompt + prompt, modelId);
+    // Use new adaptive token estimation (with fallback to old heuristic internally)
+    const estimatedTokens = countTokens(systemPrompt + prompt, modelId);
     const hasTools = Array.isArray(bodyAny.tools) && bodyAny.tools.length > 0;
+
+    // ============================================================
+    // SEMANTIC CACHE CHECK (non-streaming only, for now)
+    // ============================================================
+    let cachedResponse: any = null;
+    if (!isStream && process.env.SEMANTIC_CACHE_ENABLED !== 'false') {
+      const cacheHit = semanticCache.lookup(prompt);
+      if (cacheHit) {
+        cachedResponse = cacheHit;
+        console.log(`[Chat] Semantic cache HIT: ${cacheHit.hash.slice(0, 8)}, category=${cacheHit.category}`);
+        metrics.increment('cache.semantic.hit');
+      }
+    }
+
+    // CONTEXT SUMMARIZATION will be done after conversationId is defined (see below)
     
     let finalPrompt: string;
     if (estimatedTokens > modelContextWindow - 1000) {
@@ -348,6 +563,17 @@ WRONG:  {"name":"X"}
     const isThinkingModel = !body.model.includes('no-thinking');
     const isNewSession = !messages.some(m => m.role === 'assistant');
 
+    // ============================================================
+    // AUTO-SPLIT LOGIC: Check if we need multi-prompt processing
+    // ============================================================
+    const totalToolCallsInHistory = countToolCallsInMessages(messages);
+    const MAX_TOOL_CALLS_PER_SEGMENT = 4;
+    const needsAutoSplit = totalToolCallsInHistory > MAX_TOOL_CALLS_PER_SEGMENT;
+    
+    if (needsAutoSplit) {
+      console.log(`[Chat] Auto-split triggered: ${totalToolCallsInHistory} tool calls in history (threshold: ${MAX_TOOL_CALLS_PER_SEGMENT})`);
+    }
+
     // === SESSION PERSISTENCE ===
     const conversationId = (bodyAny as any).conversation_id || 
       (bodyAny as any).metadata?.conversation_id ||
@@ -358,6 +584,30 @@ WRONG:  {"name":"X"}
         }).join('|');
         return 'auto-' + crypto.createHash('md5').update(firstMsgs).digest('hex').slice(0, 16);
       })();
+
+    // ============================================================
+    // CONTEXT SUMMARIZATION (if context > 80% of window)
+    // ============================================================
+    let messagesForRequest = messages;
+    if (process.env.SUMMARIZER_ENABLED !== 'false' && !cachedResponse) {
+      const plainMessages = messages.map(m => ({
+        role: m.role,
+        content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
+      }));
+      if (needsSummarization(plainMessages, modelId)) {
+        try {
+          const summaryResult = await summarizeConversation(conversationId, plainMessages, modelId);
+          if (summaryResult) {
+            messagesForRequest = summaryResult.summarizedMessages as any;
+            metrics.increment('summarizer.triggered');
+            metrics.histogram('summarizer.tokens_saved', summaryResult.tokensSaved);
+            console.log(`[Chat] Context summarized: saved ${summaryResult.tokensSaved} tokens`);
+          }
+        } catch (err: any) {
+          console.warn('[Chat] Summarization failed, using original messages:', err.message);
+        }
+      }
+    }
     
     const existingSession = isNewSession ? null : getSession(conversationId);
     let useExistingChat = false;
@@ -371,15 +621,24 @@ WRONG:  {"name":"X"}
       console.log(`[Chat] Reusing session: ${conversationId} -> chat ${forcedChatId}`);
     }
 
-    let account: any = forcedAccountId 
-      ? { id: forcedAccountId, email: 'session-account' }
-      : getNextAccount();
+    // S1: If X-Account-Id is pinned, force that specific account
+    let account: any;
+    if (requestedAccountId) {
+      account = { id: requestedAccountId, email: `pinned-${requestedAccountId}` };
+    } else if (forcedAccountId) {
+      account = { id: forcedAccountId, email: 'session-account' };
+    } else {
+      account = getNextAccount();
+    }
     const triedAccountIds = new Set<string>();
     let lastError: any = null;
 
     let stream: ReadableStream | undefined;
     let uiSessionId = '';
     const completionId = 'chatcmpl-' + crypto.randomUUID();
+
+    // S2: Track the acquired lock so we can release it on stream completion
+    let acquiredLock: { release: () => void; accountId: string } | null = null;
 
     while (account) {
       const accountId = account.id;
@@ -398,7 +657,37 @@ WRONG:  {"name":"X"}
         continue;
       }
 
-      console.log(`[Chat] Routing request to account: ${accountEmail} (${accountId})`);
+      // ============================================================
+      // S2: ACQUIRE ACCOUNT LOCK — prevent concurrent use
+      // If account is locked by another request, try the next one.
+      // If X-Account-Id was pinned and locked, wait with timeout.
+      // ============================================================
+      // S2 timeout configurável via LOCK_TIMEOUT_MS (default 30s para pinned)
+      // Pinned accounts aguardam (podem ser subagentes esperando slot).
+      // Rotating (sem X-Account-Id) falha rápido e tenta próxima conta.
+      const lockTimeoutMs = requestedAccountId
+        ? parseInt(process.env.LOCK_TIMEOUT_MS || '30000', 10)
+        : 0;
+      const lock = await acquireAccountLock(accountId, `${agentId}:${requestId}`, lockTimeoutMs);
+      if (!lock) {
+        if (requestedAccountId) {
+          // Pinned account is busy even after waiting — hard fail
+          const info = getLockInfo(accountId);
+          console.warn(`[Chat] Pinned account ${accountId} still busy after ${lockTimeoutMs}ms (held by ${info.owner}, ${info.waiters} waiters)`);
+          return c.json({
+            error: `Account ${accountId} is busy (held by ${info.owner}). Try again later or use a different account.`
+          }, 429);
+        }
+        // Rotating: try next account
+        console.log(`[Chat] Account ${accountEmail} (${accountId}) is locked by another request, trying next...`);
+        account = getNextAvailableAccount(accountId);
+        continue;
+      }
+
+      console.log(`[Chat] Routing request to account: ${accountEmail} (${accountId}) [locked by ${agentId}]`);
+
+      // Store lock reference so we can release it after stream completes
+      acquiredLock = { release: lock.release, accountId };
 
       let retries = 3;
       let retryDelay = 500;
@@ -497,6 +786,11 @@ WRONG:  {"name":"X"}
 
     if (!stream) {
       removeStream(completionId);
+      // S2: Release lock if we acquired one but failed to get a stream
+      if (acquiredLock) {
+        acquiredLock.release();
+        acquiredLock = null;
+      }
       throw lastError || new Error('All accounts failed');
     }
 
@@ -588,6 +882,43 @@ WRONG:  {"name":"X"}
       if (hasToolCalls) message.tool_calls = toolCallsOut;
 
       removeStream(completionId);
+
+      // ============================================================
+      // STORE IN SEMANTIC CACHE (non-streaming, successful response)
+      // ============================================================
+      if (process.env.SEMANTIC_CACHE_ENABLED !== 'false') {
+        try {
+          const responseContent = hasToolCalls ? JSON.stringify(toolCallsOut) : finalContent;
+          if (responseContent && responseContent.length > 20) {
+            semanticCache.store(prompt, responseContent);
+          }
+        } catch (err: any) {
+          console.warn('[Chat] Failed to store in semantic cache:', err.message);
+        }
+      }
+
+      // ============================================================
+      // RECORD TENANT REQUEST
+      // ============================================================
+      if (tenant) {
+        decrementStreams(tenant.id);
+        recordRequest({
+          tenantId: tenant.id,
+          requestId,
+          model: body.model,
+          tokens: usage.total_tokens,
+          latencyMs: Date.now() - requestStartTime,
+          timestamp: Date.now(),
+          success: !isEmptyResponse,
+        });
+      }
+
+      // S2: Release account lock now that non-streaming response is complete
+      if (acquiredLock) {
+        acquiredLock.release();
+        acquiredLock = null;
+      }
+
       return c.json({
         id: completionId,
         object: 'chat.completion',
@@ -613,6 +944,10 @@ WRONG:  {"name":"X"}
     c.header('Cache-Control', 'no-cache, no-transform');
     c.header('Connection', 'keep-alive');
     c.header('X-Accel-Buffering', 'no');
+
+    // For streaming responses, we need to release the lock after the stream completes.
+    // Capture it here so the honoStream callback can access it.
+    const streamingLock = acquiredLock;
 
     return honoStream(c, async (streamWriter: any) => {
       let heartbeatInterval: any;
@@ -924,6 +1259,10 @@ WRONG:  {"name":"X"}
       } finally {
         clearInterval(heartbeatInterval);
         removeStream(completionId);
+        // S2: Release account lock after streaming completes
+        if (streamingLock) {
+          streamingLock.release();
+        }
       }
     });
   } catch (err: any) {

@@ -7,8 +7,27 @@ import { cache } from '../cache/memory-cache.js'
 import { Watchdog } from '../core/watchdog.js'
 import { app as modelsApp } from './models.js'
 import { chatCompletions, chatCompletionsStop } from '../routes/chat.js'
+import { warmPoolStatus, warmPoolRefill } from '../routes/warm-pool-status.js'
 import { uploadFile } from '../routes/upload.js'
 import { getStats as getSessionStats, cleanupOldSessions, deleteSession, closeSessionDb } from '../core/session-manager.js'
+import { getAllLocks, getLockMetrics } from '../core/account-lock.js'
+
+// S2: Push lock metrics into the global metrics registry every collection cycle
+// This makes contentionRate and activeLocks visible at /metrics (Prometheus format).
+import { metrics as globalMetrics } from '../core/metrics.js'
+function pushLockMetrics() {
+  try {
+    const m = getLockMetrics();
+    globalMetrics.gauge('locks.active', m.activeLocks);
+    globalMetrics.gauge('locks.waiters', m.totalWaiters);
+    globalMetrics.gauge('locks.acquires_total', m.totalAcquires);
+    globalMetrics.gauge('locks.contended_total', m.totalContended);
+    globalMetrics.gauge('locks.timeouts_total', m.totalTimeouts);
+    // contentionRate * 1000 to preserve 3 decimals as integer (Prometheus best practice)
+    globalMetrics.gauge('locks.contention_rate_per_mille', Math.round(m.contentionRate * 1000));
+  } catch {}
+}
+
 
 const app = new Hono()
 
@@ -49,6 +68,8 @@ app.route('', modelsApp)
 app.post('/v1/chat/completions', chatCompletions)
 app.post('/v1/chat/completions/stop', chatCompletionsStop)
 app.post('/v1/upload', uploadFile)
+app.get('/v1/warm-pool/status', warmPoolStatus)
+app.post('/v1/warm-pool/refill', warmPoolRefill)
 
 app.get('/health', async (c) => {
   const status = await watchdog?.getStatus()
@@ -84,6 +105,16 @@ app.get('/metrics', (c) => {
   return c.text(metrics.formatPrometheus(), {
     headers: { 'Content-Type': 'text/plain; version=0.0.4' },
   })
+})
+
+// S2: Account lock observability — shows which accounts are currently
+// locked by active requests, who holds them, and queue depth.
+// Useful for debugging multi-agent parallel execution.
+app.get('/v1/accounts/locks', (c) => {
+  return c.json({
+    locks: getAllLocks(),
+    metrics: getLockMetrics(),
+  });
 })
 
 app.onError((err, c) => {
@@ -128,6 +159,10 @@ export async function startServer(): Promise<void> {
 
   metrics.startCollection()
 
+  // S2: Periodically export lock state to Prometheus metrics
+  const lockMetricsInterval = setInterval(pushLockMetrics, 5000);
+  pushLockMetrics();  // initial push
+
   server = serve({
     fetch: app.fetch,
     port: config.server.port,
@@ -140,6 +175,7 @@ export async function startServer(): Promise<void> {
     console.log(`Received ${signal}, shutting down gracefully...`)
     watchdog.stop()
     metrics.stopCollection()
+    clearInterval(lockMetricsInterval)
     await cache.close()
     closeSessionDb()
     const { closePlaywright } = await import('../services/playwright.js')

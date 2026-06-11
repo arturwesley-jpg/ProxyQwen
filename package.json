@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "npx tsx src/index.ts",
+    "start:bun": "bun run src/index.bun.ts",
     "start:firefox": "npx tsx src/index.ts --browser=firefox",
     "start:chrome": "npx tsx src/index.ts --browser=chrome",
     "start:edge": "npx tsx src/index.ts --browser=edge",
@@ -13,6 +14,11 @@
     "login:chrome": "npx tsx src/login.ts --browser=chrome",
     "login:edge": "npx tsx src/login.ts --browser=edge",
     "test": "tsx --test src/**/*.test.ts",
+    "test:new": "tsx --test src/tests/semantic-cache.test.ts src/tests/token-estimation.test.ts src/tests/model-router.test.ts src/tests/ab-testing.test.ts src/tests/speculative.test.ts src/tests/worker-pool.test.ts src/tests/multi-tenant.test.ts src/tests/opentelemetry.test.ts src/tests/edge-deployment.test.ts src/tests/header-cache.test.ts src/tests/context-summarizer.test.ts src/tests/runtime.test.ts src/tests/account-lock.test.ts src/tests/multi-agent-integration.test.ts",
+    "test:lock": "tsx --test src/tests/account-lock.test.ts",
+    "test:multiagent": "tsx --test src/tests/multi-agent-integration.test.ts",
+    "test:legacy": "tsx --test src/**/*.test.ts",
+    "bench": "tsx src/tests/benchmark.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [],
@@ -26,6 +32,7 @@
     "cacheable-lookup": "^7.0.0",
     "dotenv": "^17.4.2",
     "hono": "^4.12.21",
+    "js-tiktoken": "^1.0.21",
     "playwright": "^1.60.0",
     "tsx": "^4.22.3",
     "undici": "^8.4.1",
