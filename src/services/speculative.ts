@@ -77,9 +77,25 @@ export function textSimilarity(a: string, b: string): number {
   const normA = a.toLowerCase().replace(/[^\w\s]/g, ' ');
   const normB = b.toLowerCase().replace(/[^\w\s]/g, ' ');
 
-  // Word-level Jaccard (including short words this time)
-  const wordsA = new Set(normA.split(/\s+/).filter(w => w.length > 0));
-  const wordsB = new Set(normB.split(/\s+/).filter(w => w.length > 0));
+  // Stop words to filter out for more meaningful Jaccard
+  const STOP_WORDS = new Set([
+    'a', 'o', 'as', 'os', 'um', 'uma', 'uns', 'umas',
+    'e', 'ou', 'mas', 'por', 'para', 'com', 'sem', 'em', 'no', 'na', 'nos', 'nas',
+    'de', 'do', 'da', 'dos', 'das', 'dum', 'duma', 'duns', 'dumas',
+    'é', 'são', 'foi', 'foram', 'ser', 'está', 'estão', 'estava', 'estavam',
+    'que', 'quem', 'qual', 'quais', 'onde', 'quando', 'como', 'porque',
+    'eu', 'tu', 'ele', 'ela', 'nós', 'vós', 'eles', 'elas',
+    'me', 'te', 'se', 'nos', 'lhe', 'lhes', 'meu', 'minha', 'teu', 'tua',
+    'seu', 'sua', 'nosso', 'nossa', 'vosso', 'vossa',
+    'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by',
+    'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had',
+    'i', 'you', 'he', 'she', 'it', 'we', 'they', 'me', 'him', 'her', 'us', 'them',
+    'my', 'your', 'his', 'her', 'its', 'our', 'their',
+  ]);
+
+  // Word-level Jaccard (filtering stop words)
+  const wordsA = new Set(normA.split(/\s+/).filter(w => w.length > 0 && !STOP_WORDS.has(w)));
+  const wordsB = new Set(normB.split(/\s+/).filter(w => w.length > 0 && !STOP_WORDS.has(w)));
 
   let wordIntersection = 0;
   for (const word of wordsA) {

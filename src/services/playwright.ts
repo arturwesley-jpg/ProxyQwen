@@ -661,12 +661,13 @@ export async function closePlaywrightForAccount(accountId: string) {
   }
 }
 
-async function loginToQwenWithContext(acctContext: BrowserContext, acctPage: Page, email: string, password: string): Promise<boolean> {
+export async function loginToQwenWithContext(acctContext: BrowserContext, acctPage: Page, email: string, password: string): Promise<boolean> {
   await acctPage.goto('https://chat.qwen.ai/auth', { waitUntil: 'domcontentloaded' });
 
   const hashedPassword = crypto.createHash('sha256').update(password).digest('hex');
+  const requestId = crypto.randomUUID();
 
-  const result = await acctPage.evaluate(async ({ email, password }) => {
+  const result = await acctPage.evaluate(async ({ email, password, requestId }) => {
     try {
       const response = await fetch("https://chat.qwen.ai/api/v2/auths/signin", {
         method: "POST",
@@ -675,7 +676,7 @@ async function loginToQwenWithContext(acctContext: BrowserContext, acctPage: Pag
           "content-type": "application/json",
           "source": "web",
           "timezone": new Date().toString().split(' (')[0],
-          "x-request-id": crypto.randomUUID()
+          "x-request-id": requestId
         },
         body: JSON.stringify({ email, password, login_type: "email" })
       });
@@ -684,7 +685,7 @@ async function loginToQwenWithContext(acctContext: BrowserContext, acctPage: Pag
     } catch (e: any) {
       return { ok: false, error: e.message };
     }
-  }, { email, password: hashedPassword });
+  }, { email, password: hashedPassword, requestId });
 
   if (result.ok) {
     await acctPage.goto('https://chat.qwen.ai/', { waitUntil: 'domcontentloaded' });

@@ -129,7 +129,23 @@ export function countTokens(text: string, model?: string): number {
 
   // Apply model-specific divisor adjustment
   const divisor = model ? getModelTokenDivisor(model) : 2.0;
-  const adjustedTokens = Math.ceil((tokens / 2.0) * (2.0 / divisor) * codeMultiplier);
+  
+  // For CJK-heavy text, don't apply the base /2.0 normalization since we already use 1.5 tokens/char
+  // For ASCII text, the base /2.0 approximates the ~4 chars/token heuristic
+  let adjustedTokens: number;
+  if (tokens > 0) {
+    // Check if text has significant CJK content
+    const hasSignificantCJK = text.split('').some(c => isCJK(c));
+    if (hasSignificantCJK) {
+      // CJK already uses ~1.5 tokens/char, apply divisor directly
+      adjustedTokens = Math.ceil((tokens / divisor) * codeMultiplier);
+    } else {
+      // ASCII/Latin: base /2.0 then adjust for model
+      adjustedTokens = Math.ceil((tokens / 2.0) * (2.0 / divisor) * codeMultiplier);
+    }
+  } else {
+    adjustedTokens = 0;
+  }
 
   // Cache result
   if (tokenCache.size >= CACHE_MAX_SIZE) {

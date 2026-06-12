@@ -230,14 +230,14 @@ export function forceRelease(accountId: string): boolean {
 export function cleanupStuckLocks(maxAgeMs: number = 5 * 60 * 1000): number {
   const now = Date.now();
   let cleaned = 0;
-  
+
   for (const [accountId, lock] of activeLocks.entries()) {
-    if (now - lock.acquiredAt > maxAgeMs) {
+    if (now - lock.acquiredAt >= maxAgeMs) {
       console.warn(`[AccountLock] Cleaning up stuck lock for ${accountId} (held ${Math.round((now - lock.acquiredAt) / 1000)}s by ${lock.owner})`);
       lock.release();
       cleaned++;
     }
   }
-  
+
   return cleaned;
 }

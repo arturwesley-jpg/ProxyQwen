@@ -1,12 +1,9 @@
 import { getQwenHeaders, getBasicHeaders } from './playwright.js';
 import { MAX_PAYLOAD_SIZE } from '../core/model-registry.js';
-import { qwenAgent } from '../core/http-client.js';
+import { getQwenAgent } from '../core/http-client.js';
 import crypto from 'crypto';
-import zlib from 'zlib';
-import { promisify } from 'util';
-
-const gzip = promisify(zlib.gzip);
-const GZIP_THRESHOLD = 10240; // 10KB
+// Auto-reauth for expired cookies
+import { reauthenticateAccount, shouldTriggerReauth } from '../core/auto-reauth.js';
 
 const CACHED_TIMEZONE = new Date().toString().split(' (')[0];
 const BASE_TIMEOUT_MS = 120000;
@@ -136,8 +133,11 @@ async function createRealQwenChat(header: Record<string, string>): Promise<strin
       project_id: '',
     }),
     signal: AbortSignal.timeout(30000),
-    dispatcher: qwenAgent,
-  } as any);
+    // dispatcher: getQwenAgent(), // Disabled to avoid "invalid onRequestStart method" error
+  } as any).catch((fetchErr: any) => {
+    console.error(`[Qwen] createRealQwenChat fetch error:`, fetchErr?.message, fetchErr?.code, fetchErr?.cause?.message);
+    throw fetchErr;
+  });
 
   if (!response.ok) throw new Error(`Failed to create chat: ${response.status}`);
   const text = await response.text().catch(() => '');
@@ -160,6 +160,11 @@ async function refillPoolForAccount(accountId: string) {
     headers = await getBasicQwenHeaders(accountId === 'global' ? undefined : accountId);
   } catch (err) {
     console.error(`[WarmPool] header fetch failed for ${accountId}:`, (err as Error).message);
+    // Try reauth if error suggests expired cookies
+    if (accountId !== 'global' && shouldTriggerReauth(accountId, (err as Error).message)) {
+      console.log(`[WarmPool] Attempting auto-reauth for ${accountId}...`);
+      await reauthenticateAccount(accountId);
+    }
     return;
   }
 
@@ -168,7 +173,24 @@ async function refillPoolForAccount(accountId: string) {
       const chatId = await createRealQwenChat(headers);
       return { chatId, headers, accountId, timestamp: Date.now() };
     } catch (err) {
-      console.error(`[WarmPool] chat creation failed for ${accountId}:`, (err as Error).message);
+      const errMsg = (err as Error).message;
+      console.error(`[WarmPool] chat creation failed for ${accountId}:`, errMsg);
+      
+      // Try auto-reauth on auth/cookie errors
+      if (accountId !== 'global' && shouldTriggerReauth(accountId, errMsg)) {
+        console.log(`[WarmPool] Chat creation failed with auth error, attempting reauth for ${accountId}...`);
+        const reauthSuccess = await reauthenticateAccount(accountId);
+        if (reauthSuccess) {
+          // Retry once with fresh headers after reauth
+          try {
+            const freshHeaders = await getBasicQwenHeaders(accountId);
+            const retryChatId = await createRealQwenChat(freshHeaders);
+            return { chatId: retryChatId, headers: freshHeaders, accountId, timestamp: Date.now() };
+          } catch (retryErr) {
+            console.error(`[WarmPool] Retry after reauth also failed for ${accountId}:`, (retryErr as Error).message);
+          }
+        }
+      }
       return null;
     }
   });
@@ -180,47 +202,9 @@ async function refillPoolForAccount(accountId: string) {
 }
 
 export async function getWarmedChat(accountId?: string) {
-  const key = accountId || 'global';
-  let pool = warmPool.get(key);
-  if (!pool) { pool = []; warmPool.set(key, pool); }
-  cleanupStalePool(key);
-
-  // MUTEX: serialize pop+refill to prevent race condition where concurrent requests get same chatId
-  const mutex = getWarmPoolMutex(key);
-  let result: WarmPoolEntry | null = null;
-
-  await mutex.then(async () => {
-    // Re-check pool after acquiring mutex (another request may have popped)
-    if (pool.length === 0) {
-      // Predictive refill when pool <= 6 (20% of 30)
-      if (pool.length <= 6 && !refillPromises.has(key)) {
-        refillPromises.set(key, refillPoolForAccount(key).finally(() => refillPromises.delete(key)));
-      }
-
-      // Ensure refill is running
-      if (!refillPromises.has(key)) {
-        refillPromises.set(key, refillPoolForAccount(key).finally(() => refillPromises.delete(key)));
-      }
-      await refillPromises.get(key);
-
-      if (pool.length === 0) {
-        // Retry once with short backoff
-        await new Promise(r => setTimeout(r, 1000));
-        if (!refillPromises.has(key)) {
-          refillPromises.set(key, refillPoolForAccount(key).finally(() => refillPromises.delete(key)));
-        }
-        await refillPromises.get(key);
-      }
-    }
-
-    if (pool.length === 0) throw new Error(`Warm pool empty after retry for ${key}`);
-    result = pool.shift()!;
-  });
-
-  // Update mutex with a resolved promise for next caller
-  setWarmPoolMutex(key, Promise.resolve());
-
-  return result!;
+  // DISABLED: Warm pool disabled to prevent hammering Qwen API
+  // Returns null to force direct chat creation via createRealQwenChat
+  return null as any;
 }
 
 export async function warmAllPools(accountIds: string[]) {
@@ -318,7 +302,7 @@ export async function disableNativeTools(accountId?: string): Promise<void> {
       },
       body: JSON.stringify(payload),
       signal: controller.signal,
-      dispatcher: qwenAgent,
+      dispatcher: getQwenAgent(),
     } as any);
     clearTimeout(timeoutId);
 
@@ -444,23 +428,26 @@ export async function createQwenStream(
       chatId = existingChatId;
       console.log(`[Qwen] Reusing existing chat: ${chatId}`);
     } catch (err: any) {
-      console.error(`[Qwen] Failed to reuse chat, falling back to warm pool:`, err.message);
-      const chatEntry = await getWarmedChat(accountId);
-      chatId = chatEntry.chatId;
-      chatHeaders = chatEntry.headers;
+      console.error(`[Qwen] Failed to reuse chat, creating new chat:`, err.message);
+      const basicHeaders = await getBasicHeaders(accountId);
+      chatHeaders = {
+        cookie: basicHeaders.cookie,
+        'user-agent': basicHeaders.userAgent,
+        'bx-v': basicHeaders.bxV,
+      };
+      chatId = await createRealQwenChat(chatHeaders);
+      console.log(`[Qwen] Created new chat: ${chatId}`);
     }
   } else {
-    try {
-      const chatEntry = await getWarmedChat(accountId);
-      chatId = chatEntry.chatId;
-      chatHeaders = chatEntry.headers;
-    } catch (err: any) {
-      if (err.message?.includes('chat is in progress') || err.message?.includes('The chat is in progress')) {
-        const retryAfterMs = 2000 + Math.floor(Math.random() * 2000);
-        throw new RetryableQwenStreamError(`Qwen: ${err.message}`, retryAfterMs);
-      }
-      throw err;
-    }
+    // Warm pool is disabled - create chat directly
+    const basicHeaders = await getBasicHeaders(accountId);
+    chatHeaders = {
+      cookie: basicHeaders.cookie,
+      'user-agent': basicHeaders.userAgent,
+      'bx-v': basicHeaders.bxV,
+    };
+    chatId = await createRealQwenChat(chatHeaders);
+    console.log(`[Qwen] Created new chat: ${chatId}`);
   }
   const actualParentId: string | null = null;
 
@@ -545,6 +532,9 @@ export async function createQwenStream(
 
   const payloadJson = JSON.stringify(payload);
   const payloadSize = Buffer.byteLength(payloadJson);
+  // DEBUG: Log payload info
+  console.log(`[Qwen DEBUG] Payload size: ${payloadSize} bytes`);
+  console.log(`[Qwen DEBUG] Payload preview (first 500 chars): ${payloadJson.slice(0, 500)}`);
   if (payloadSize > MAX_PAYLOAD_SIZE) {
     throw new Error(`Payload too large: ${payloadSize} bytes exceeds limit of ${MAX_PAYLOAD_SIZE} bytes`);
   }
@@ -574,30 +564,42 @@ export async function createQwenStream(
     'bx-v': chatHeaders['bx-v'],
   };
 
-  if (payloadSize > GZIP_THRESHOLD) {
-    try {
-      const compressed = await gzip(payloadJson);
-      bodyToSend = compressed;
-      headersToSend['content-encoding'] = 'gzip';
-      console.log(`[Qwen] Payload comprimido: ${payloadSize} bytes -> ${compressed.length} bytes (${((1 - compressed.length / payloadSize) * 100).toFixed(1)}% redução)`);
-    } catch (err: any) {
-      console.error(`[Qwen] Erro ao comprimir payload: ${err.message}, enviando sem compressão`);
-      bodyToSend = payloadJson;
-    }
-  }
+  // DISABLED: Qwen API does not accept gzipped request bodies
+  // if (payloadSize > GZIP_THRESHOLD) {
+  //   try {
+  //     const compressed = await gzip(payloadJson);
+  //     bodyToSend = compressed;
+  //     headersToSend['content-encoding'] = 'gzip';
+  //     console.log(`[Qwen] Payload comprimido: ${payloadSize} bytes -> ${compressed.length} bytes (${((1 - compressed.length / payloadSize) * 100).toFixed(1)}% redução)`);
+  //   } catch (err: any) {
+  //     console.error(`[Qwen] Erro ao comprimir payload: ${err.message}, enviando sem compressão`);
+  //     bodyToSend = payloadJson;
+  //   }
+  // }
 
   const response = await fetch(url, {
     method: 'POST',
     headers: headersToSend,
     body: bodyToSend,
     signal: controller.signal,
-    dispatcher: qwenAgent,
-  } as any);
+    // dispatcher: getQwenAgent(), // Disabled to avoid "invalid onRequestStart method" error
+  } as any).catch((fetchErr: any) => {
+    console.error(`[Qwen] Fetch error for ${chatId}:`, fetchErr?.message, fetchErr?.code, fetchErr?.cause?.message);
+    throw fetchErr;
+  });
   clearTimeout(timeoutId);
 
   if (!response.ok || !response.body) {
     const errText = await response.text().catch(() => '');
     const contentType = response.headers.get('content-type') || '';
+
+    // Check for auth errors and trigger reauth
+    if (accountId && accountId !== 'global') {
+      if (response.status === 401 || response.status === 403) {
+        console.warn(`[Qwen] Auth error ${response.status} for account ${accountId}, triggering reauth...`);
+        reauthenticateAccount(accountId).catch(() => {});
+      }
+    }
 
     if (contentType.includes('application/json')) {
       try {
@@ -646,4 +648,73 @@ export async function createQwenStream(
   }
 
   return { stream: response.body, headers: chatHeaders, uiSessionId: chatId, controller, accountId: accountId || 'global', chatId };
+}
+
+// ============================================================
+// AUTO-REAUTH: Periodic background check for expired cookies
+// ============================================================
+let reauthCheckInterval: NodeJS.Timeout | null = null;
+const REAUTH_CHECK_INTERVAL_MS = 5 * 60 * 1000; // Check every 5 minutes
+
+export async function startAutoReauthChecker(): Promise<void> {
+  if (reauthCheckInterval) return;
+  
+  console.log('[AutoReauth] Starting periodic reauth checker (every 5 min)');
+
+  reauthCheckInterval = setInterval(async () => {
+    try {
+      const { loadAccounts } = await import('../core/accounts.js');
+      const accounts = loadAccounts();
+      
+      for (const account of accounts) {
+        if (!account.email || !account.password) continue;
+        
+        const key = account.id;
+        const pool = warmPool.get(key);
+        const poolSize = pool?.length || 0;
+        
+        // If pool is empty or shrinking, might indicate cookie issues
+        // Only check if pool exists (account has been initialized)
+        if (pool && poolSize < 5) {
+          console.log(`[AutoReauth] Pool low for ${account.email} (size: ${poolSize}), checking...`);
+          
+          // Try to get headers to verify cookies work
+          try {
+            await getBasicQwenHeaders(key);
+          } catch (err) {
+            const errMsg = (err as Error).message;
+            if (shouldTriggerReauth(key, errMsg)) {
+              console.log(`[AutoReauth] Detected auth issue for ${account.email}, triggering reauth...`);
+              await reauthenticateAccount(key);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.error('[AutoReauth] Periodic check error:', (err as Error).message);
+    }
+  }, REAUTH_CHECK_INTERVAL_MS);
+  
+  // Initial reauth on startup DISABLED to avoid launching all browser contexts at once
+  // Accounts will be initialized lazily on first use
+  // setTimeout(async () => {
+  //   try {
+  //     const { loadAccounts } = await import('../core/accounts.js');
+  //     const accounts = loadAccounts();
+  //     for (const account of accounts) {
+  //       if (account.email && account.password) {
+  //         console.log(`[AutoReauth] Initial reauth for ${account.email}...`);
+  //         await reauthenticateAccount(account.id);
+  //       }
+  //     }
+  //   } catch {}
+  // }, 10000);
+}
+
+export function stopAutoReauthChecker(): void {
+  if (reauthCheckInterval) {
+    clearInterval(reauthCheckInterval);
+    reauthCheckInterval = null;
+    console.log('[AutoReauth] Periodic checker stopped');
+  }
 }

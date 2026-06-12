@@ -64,6 +64,7 @@ const CODE_PATTERNS = [
   /\b(def|class|import|from|return|if|elif|else|for|while)\s+\w+/i,
   /\b(public|private|protected|static|void|int|string|boolean)\s+/i,
   /\b(function|def|class|escreva|write)\s+\w+\s*\(/i,
+  /\b(escreva|write)\s+\w+/i,
   /\bconsole\.(log|error|warn|info)\s*\(/i,
   /\bprint\s*\(/i,
   /\bSystem\.(out|err)\s*\./i,
@@ -72,7 +73,7 @@ const CODE_PATTERNS = [
 ];
 
 // Factual question patterns (EXPANDED for PT/EN/ES)
-const FACTUAL_PATTERNS = /\b(o que é|o que sao|o que são|who is|what is|what are|quando foi|when was|onde fica|where is|quantos|how many|qual é|which is|define|definition|significa|means)\b/i;
+const FACTUAL_PATTERNS = /\b(o que (?:e|é)|o que sao|o que são|what is|what are|quando foi|when was|onde fica|where is|quantos|how many|qual (?:e|é)|which is|define|definition|significa|means)\b/i;
 
 // Creative patterns
 const CREATIVE_PATTERNS = /\b(escreva|crie|write|create|compose|story|poem|poema|história|invent|imagine|inventar)\b/i;

@@ -12,7 +12,15 @@ let accountsCache: QwenAccount[] | null = null
 let accountsCacheTimestamp = 0
 const ACCOUNTS_CACHE_TTL = config.cache.defaultTTL * 1000
 
+// Test mock accounts - injected by test setup
+let mockAccounts: QwenAccount[] | null = null
+
 function getCachedAccounts(): QwenAccount[] {
+  // If mock accounts are set (for testing), use them
+  if (mockAccounts !== null) {
+    return mockAccounts
+  }
+  
   const now = Date.now()
   if (!accountsCache || (now - accountsCacheTimestamp) > ACCOUNTS_CACHE_TTL) {
     const db = getDatabase()
@@ -29,6 +37,24 @@ export function invalidateAccountsCache(): void {
 
 export function loadAccounts(): QwenAccount[] {
   return getCachedAccounts()
+}
+
+/**
+ * Test-only: inject mock accounts to avoid hitting the database
+ * Call this in test setup before importing modules that use accounts
+ */
+export function setMockAccounts(accounts: QwenAccount[]): void {
+  mockAccounts = accounts
+  accountsCache = accounts
+  accountsCacheTimestamp = Date.now()
+}
+
+/**
+ * Test-only: clear mock accounts and restore database loading
+ */
+export function clearMockAccounts(): void {
+  mockAccounts = null
+  invalidateAccountsCache()
 }
 
 export function addAccount(email: string, password: string, id?: string): QwenAccount {

@@ -1,5 +1,6 @@
 import { QwenAccount, loadAccounts } from './accounts.js'
 import { config } from './config.js'
+import { isAccountLocked } from './account-lock.js'
 
 let currentIndex = 0
 
@@ -96,6 +97,29 @@ export function getNextAvailableAccount(skipAccountId?: string): QwenAccount | n
 
   // All remaining accounts on cooldown — return null to force caller to handle "no accounts available"
   console.warn(`[AccountManager] ALL remaining accounts on cooldown. Returning null.`);
+  return null;
+}
+
+/**
+ * Get next account that is NOT on cooldown AND NOT locked.
+ * Used for rotating (non-pinned) requests to avoid infinite loop when all accounts are locked.
+ */
+export function getNextUnlockedAccount(skipAccountId?: string): QwenAccount | null {
+  const accounts = getCachedAccounts()
+  if (accounts.length === 0) return null
+
+  for (let i = 0; i < accounts.length; i++) {
+    const idx = (currentIndex + i) % accounts.length
+    const account = accounts[idx]
+    if (skipAccountId && account.id === skipAccountId) continue
+    if (!isAccountOnCooldown(account.id) && !isAccountLocked(account.id)) {
+      currentIndex = (idx + 1) % accounts.length
+      return account
+    }
+  }
+
+  // All remaining accounts on cooldown or locked — return null
+  console.warn(`[AccountManager] ALL remaining accounts on cooldown or locked. Returning null.`);
   return null;
 }
 

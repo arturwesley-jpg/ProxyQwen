@@ -13,6 +13,7 @@ import { stream as honoStream } from 'hono/streaming';
 import crypto from 'crypto';
 import { createQwenStream, updateSessionParent, RetryableQwenStreamError } from '../services/qwen.js';
 import { OpenAIRequest, ChoiceDelta, Message, MessageToolCall } from '../utils/types.js';
+console.log('[Chat Module] chat.ts loaded');
 import { registry } from '../tools/registry.js';
 import type { FunctionToolDefinition } from '../tools/types.js';
 import { robustParseJSON } from '../utils/json.js';
@@ -20,7 +21,8 @@ import { StreamingToolParser } from '../tools/parser.js';
 import { QwenStreamParser, ParsedChunkResult } from '../utils/qwen-stream-parser.js';
 import { getModelContextWindow } from '../core/model-registry.js'
 import { truncateMessages, estimateTokenCount } from '../utils/context-truncation.js';
-import { getNextAccount, getNextAvailableAccount, markAccountRateLimited, getAccountCooldownInfo, getAccountCount } from '../core/account-manager.js';
+import { getNextAccount, getNextAvailableAccount, getNextUnlockedAccount, markAccountRateLimited, getAccountCooldownInfo, getAccountCount } from '../core/account-manager.js';
+import { getAccountCredentials } from '../core/accounts.js';
 import { registerStream, removeStream, getStream } from '../core/stream-registry.js';
 import { metrics } from '../core/metrics.js'
 import { getSession, createSession, updateSession } from '../core/session-manager.js'
@@ -302,6 +304,53 @@ function parseQwenErrorPayload(raw: string): { message: string; status: number }
 }
 
 export async function chatCompletions(c: Context) {
+  console.log(`[Chat Debug ENTRY] Path: ${c.req.path}, Method: ${c.req.method}`);
+  console.log(`[Chat Debug] About to read raw body`);
+  // DEBUG: Log raw body - use c.req.raw to handle chunked encoding properly in Node.js
+  const rawBody = await c.req.text();
+  console.log(`[Chat Debug] Raw body length: ${rawBody.length}`);
+  console.log(`[Chat Debug] Raw body preview: ${rawBody.slice(0, 500)}`);
+  
+  // Handle chunked encoding issue: if body starts with hex chunk size, decode it
+  let body: OpenAIRequest;
+  try {
+    body = JSON.parse(rawBody);
+  } catch (e) {
+    // Check if it's a chunked encoding issue (body starts with hex/decimal length)
+    // Standard chunked: "1925\r\n{json}\r\n0\r\n\r\n" (hex size)
+    // But we're seeing: "1925{json}" (decimal size, no CRLF after size)
+    const chunkedMatch = rawBody.match(/^([0-9a-fA-F]+)(?:\r?\n)?(.*)/s);
+    if (chunkedMatch) {
+      console.log('[Chat Debug] Detected chunked encoding, attempting to decode...');
+      // Try parsing as hex first (standard), then decimal
+      const hexSize = parseInt(chunkedMatch[1], 16);
+      const decSize = parseInt(chunkedMatch[1], 10);
+      let chunkData = chunkedMatch[2];
+      // Remove trailing chunk terminator (0\r\n\r\n) if present
+      chunkData = chunkData.replace(/\r?\n0\r?\n\r?\n?$/, '');
+      console.log(`[Chat Debug] Hex chunk size: ${hexSize}, Decimal chunk size: ${decSize}, data length: ${chunkData.length}`);
+      
+      // Check which size matches
+      let chunkSize = hexSize;
+      if (chunkData.length !== hexSize && chunkData.length === decSize) {
+        chunkSize = decSize;
+        console.log('[Chat Debug] Using decimal chunk size');
+      } else if (chunkData.length === hexSize || chunkData.length === hexSize + 2) {
+        console.log('[Chat Debug] Using hex chunk size');
+      }
+      
+      if (chunkData.length === chunkSize || chunkData.length === chunkSize + 2) { // +2 for possible \r\n
+        body = JSON.parse(chunkData);
+        console.log('[Chat Debug] Successfully decoded chunked body');
+      } else {
+        throw new Error(`Chunk size mismatch: expected ${chunkSize}, got ${chunkData.length}`);
+      }
+    } else {
+      throw e;
+    }
+  }
+  
+  const isStream = body.stream ?? false;
   try {
     // ============================================================
     // TOOL NAME MAPPER: OpenClaude native tools -> Proxy tools
@@ -332,9 +381,6 @@ export async function chatCompletions(c: Context) {
     proxyToOpenClaudeToolMap["edit_file"] = "Edit";
     // ============================================================
 
-    const body: OpenAIRequest = await c.req.json();
-    const isStream = body.stream ?? false;
-
     // ============================================================
     // S1: X-Account-Id HEADER — Pin request to a specific account
     // Used by multi-agent setups (e.g. Hermes custom_providers) to
@@ -343,6 +389,7 @@ export async function chatCompletions(c: Context) {
     // ============================================================
     const requestedAccountId = c.req.header('X-Account-Id') || c.req.header('x-account-id') || undefined;
     const agentId = c.req.header('X-Agent-Id') || c.req.header('x-agent-id') || 'default';
+    console.log(`[Chat Debug] Headers: X-Account-Id=${c.req.header('X-Account-Id')}, x-account-id=${c.req.header('x-account-id')}, requestedAccountId=${requestedAccountId}, agentId=${agentId}`);
     if (requestedAccountId) {
       console.log(`[Chat] X-Account-Id pinned: ${requestedAccountId} (agent=${agentId})`);
     }
@@ -642,10 +689,20 @@ WRONG:  {"name":"X"}
           if (triedAccountIds.has(requestedAccountId)) {
             account = getNextAvailableAccount(requestedAccountId);
           } else {
-            account = { id: requestedAccountId, email: `pinned-${requestedAccountId}` };
+            const credentials = getAccountCredentials(requestedAccountId);
+            if (!credentials) {
+              console.error(`[Chat] Pinned account ${requestedAccountId} not found in database`);
+              break;
+            }
+            account = { id: credentials.id, email: credentials.email };
           }
         } else if (forcedAccountId) {
-          account = { id: forcedAccountId, email: 'session-account' };
+          const credentials = getAccountCredentials(forcedAccountId);
+          if (!credentials) {
+            console.error(`[Chat] Forced account ${forcedAccountId} not found in database`);
+            break;
+          }
+          account = { id: credentials.id, email: credentials.email };
         } else {
           account = getNextAccount();
         }
@@ -662,7 +719,7 @@ WRONG:  {"name":"X"}
         if (cooldownInfo && accountId !== 'global') {
           console.log(`[Chat] Skipping account ${accountEmail} (${accountId}) — on cooldown for ${Math.round(cooldownInfo.remainingMs / 1000)}s (${cooldownInfo.reason})`);
           triedAccountIds.add(accountId);
-          account = getNextAvailableAccount(accountId);
+          account = getNextUnlockedAccount(accountId);
           continue;
         }
 
@@ -690,7 +747,7 @@ WRONG:  {"name":"X"}
           // Rotating: try next account
           console.log(`[Chat] Account ${accountEmail} (${accountId}) is locked by another request, trying next...`);
           triedAccountIds.add(accountId);
-          account = getNextAvailableAccount(accountId);
+          account = getNextUnlockedAccount(accountId);
           continue;
         }
 
@@ -735,6 +792,7 @@ WRONG:  {"name":"X"}
             break;
           } catch (err: any) {
             retries--;
+            console.error(`[Chat] createQwenStream error for ${accountEmail} (attempt ${4-retries}/3):`, err?.message, err?.upstreamCode, err?.upstreamStatus);
 
             if (err.upstreamCode === 'RateLimited' || err.upstreamStatus === 429) {
               // Robust regex: /Wait about (\d+)\s*hour/ + default 19h (not 3 min)
@@ -749,13 +807,17 @@ WRONG:  {"name":"X"}
                 forcedChatId = undefined;
                 forcedAccountId = undefined;
                 triedAccountIds.add(accountId);
-                account = getNextAvailableAccount(accountId);
+                // Release lock before switching account
+                if (acquiredLock) { acquiredLock.release(); acquiredLock = null; }
+                account = getNextUnlockedAccount(accountId);
                 retries = 3;
                 continue;
               }
               // ROTATE IMMEDIATELY to next account on RateLimited (before break)
               triedAccountIds.add(accountId);
-              account = getNextAvailableAccount(accountId);
+              // Release lock before switching account
+              if (acquiredLock) { acquiredLock.release(); acquiredLock = null; }
+              account = getNextUnlockedAccount(accountId);
               break;
             }
 
@@ -771,9 +833,21 @@ WRONG:  {"name":"X"}
                 forcedChatId = undefined;
                 forcedAccountId = undefined;
                 triedAccountIds.add(accountId);
-                account = getNextAvailableAccount(accountId);
+                // Release lock before switching account
+                if (acquiredLock) { acquiredLock.release(); acquiredLock = null; }
+                account = getNextUnlockedAccount(accountId);
                 retries = 3;
                 continue;
+              }
+              // For pinned accounts (X-Account-Id): fail fast after retries exhausted
+              // S1 design: pinned accounts don't rotate, they either succeed or return 429/502
+              if (requestedAccountId) {
+                console.warn(`[Chat] Pinned account ${accountId} failed after retries, returning error`);
+                // Release lock
+                if (acquiredLock) { acquiredLock.release(); acquiredLock = null; }
+                // Set flag to break outer loop and don't try other accounts
+                success = false;
+                break; // breaks inner while loop
               }
               break;
             }
@@ -797,21 +871,31 @@ WRONG:  {"name":"X"}
           break;
         }
 
-        if (stream) {
-          // We had a stream but it failed, try next account
-          account = getNextAvailableAccount(accountId);
-        } else if (!triedAccountIds.has(accountId)) {
-          // No stream and we haven't tried this account yet, try next
-          account = getNextAvailableAccount(accountId);
-        }
-        
-        // Check if we've exhausted all accounts
-        const totalAccounts = getAccountCount();
-        if (triedAccountIds.size >= totalAccounts) {
-          console.warn(`[Chat] All ${totalAccounts} accounts exhausted (tried: ${triedAccountIds.size})`);
+        // If pinned account failed after retries, break outer loop and don't try other accounts
+        if (requestedAccountId && !success) {
+          console.warn(`[Chat] Pinned account ${accountId} failed, not rotating to other accounts`);
           break;
         }
-        // If we already tried this account and no stream, loop will continue and pick next
+
+        // Release current lock before trying next account
+        if (acquiredLock) {
+          acquiredLock.release();
+          acquiredLock = null;
+        }
+
+        // Mark this account as tried so we don't retry it indefinitely
+        triedAccountIds.add(accountId);
+
+        // Try next account
+        account = getNextUnlockedAccount(accountId);
+
+        // Check if we've exhausted all AVAILABLE accounts (not on cooldown/locked)
+        // getNextUnlockedAccount returns null when all remaining accounts are on cooldown/locked
+        // Also break if we've cycled back to an already-tried account
+        if (!account || triedAccountIds.has(account.id)) {
+          console.warn(`[Chat] All available accounts exhausted (tried: ${triedAccountIds.size})`);
+          break;
+        }
       }
     } finally {
       // Lock is released in specific paths (lines below), but TypeScript requires finally
@@ -828,6 +912,8 @@ WRONG:  {"name":"X"}
         acquiredLock.release();
         acquiredLock = null;
       }
+      // Log the actual error for debugging
+      console.error(`[Chat] All accounts failed. Last error:`, lastError?.message, lastError?.upstreamCode, lastError?.upstreamStatus);
       throw lastError || new Error('All accounts failed');
     }
 

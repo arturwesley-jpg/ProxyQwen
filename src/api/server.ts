@@ -143,20 +143,16 @@ export async function startServer(): Promise<void> {
 
   const { initPlaywright, initPlaywrightForAccount, getQwenHeaders } = await import('../services/playwright.js')
   
+  // Auto-reauth: start periodic checker
+  const { startAutoReauthChecker, stopAutoReauthChecker } = await import('../services/qwen.js')
+  startAutoReauthChecker()
+
   await initPlaywright(config.browser.headless)
   
   if (accounts.length > 0) {
-    console.log(`[Server] Pre-warming ${accounts.length} configured account(s) in parallel...`)
-    await Promise.all(
-      accounts.map(account =>
-        initPlaywrightForAccount(account, config.browser.headless).catch((err: any) => {
-          console.error(`[Server] Failed to initialize account ${account.email}:`, err.message)
-        })
-      )
-    )
-    console.log('[Server] Pre-fetching headers for all accounts in background...')
-    const { warmAllPools } = await import('../services/qwen.js')
-    warmAllPools(accounts.map(a => a.id)).catch(() => {})
+    console.log(`[Server] ${accounts.length} configured account(s) - lazy initialization enabled`)
+    // Pre-warming disabled to avoid OOM with multiple browser contexts
+    // Accounts will be initialized on first use via getBasicHeaders
   }
 
   watchdog = new Watchdog()
@@ -181,6 +177,7 @@ export async function startServer(): Promise<void> {
     watchdog.stop()
     metrics.stopCollection()
     clearInterval(lockMetricsInterval)
+    stopAutoReauthChecker()
     await cache.close()
     closeSessionDb()
     const { closePlaywright } = await import('../services/playwright.js')
