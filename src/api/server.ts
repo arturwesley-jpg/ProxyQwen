@@ -4,9 +4,9 @@ import { serve } from '@hono/node-server'
 import { config } from '../core/config.js'
 import { metrics } from '../core/metrics.js'
 import { cache } from '../cache/memory-cache.js'
-import { Watchdog } from '../core/watchdog.js'
+import { Watchdog, setShutdownCallback } from '../core/watchdog.js'
 import { app as modelsApp } from './models.js'
-import { chatCompletions, chatCompletionsStop } from '../routes/chat.js'
+import { chatCompletions, chatCompletionsStop } from '../routes/chat/index.js';
 import { warmPoolStatus, warmPoolRefill } from '../routes/warm-pool-status.js'
 import { uploadFile } from '../routes/upload.js'
 import { getStats as getSessionStats, cleanupOldSessions, deleteSession, closeSessionDb } from '../core/session-manager.js'
@@ -172,8 +172,8 @@ export async function startServer(): Promise<void> {
     console.log(`Server listening on http://${info.address}:${info.port}`)
   })
 
-  const shutdown = async (signal: string) => {
-    console.log(`Received ${signal}, shutting down gracefully...`)
+  const shutdown = async (signal?: string) => {
+    console.log(`Received ${signal || 'WATCHDOG_RESTART'}, shutting down gracefully...`)
     watchdog.stop()
     metrics.stopCollection()
     clearInterval(lockMetricsInterval)
@@ -187,6 +187,9 @@ export async function startServer(): Promise<void> {
     server?.close()
     process.exit(0)
   }
+
+  // Register shutdown callback for watchdog auto-restart
+  setShutdownCallback(shutdown)
 
   process.on('SIGINT', () => shutdown('SIGINT'))
   process.on('SIGTERM', () => shutdown('SIGTERM'))

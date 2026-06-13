@@ -54,7 +54,26 @@ export class Metrics extends EventEmitter {
       ['locks.contended_total', 'gauge', 'Lock acquires that found the account busy'],
       ['locks.timeouts_total', 'gauge', 'Lock acquires that timed out'],
       ['locks.contention_rate_per_mille', 'gauge', 'Contention rate * 1000 (0-1000)'],
-    ]
+      // Rate Limiter metrics
+      ['rate_limiter.allowed', 'counter', 'Rate limiter allowed requests'],
+      ['rate_limiter.rejected', 'counter', 'Rate limiter rejected requests'],
+      ['rate_limiter.global_tokens', 'gauge', 'Global rate limiter tokens available'],
+      ['rate_limiter.tenant_tokens', 'gauge', 'Tenant rate limiter tokens available'],
+      ['rate_limiter.account_tokens', 'gauge', 'Account rate limiter tokens available'],
+      // Circuit Breaker metrics
+      ['circuit_breaker.state', 'gauge', 'Circuit breaker state (0=closed, 1=half-open, 2=open)'],
+      ['circuit_breaker.requests', 'counter', 'Circuit breaker total requests'],
+      ['circuit_breaker.success', 'counter', 'Circuit breaker successful requests'],
+      ['circuit_breaker.failure', 'counter', 'Circuit breaker failed requests'],
+      ['circuit_breaker.rejected', 'counter', 'Circuit breaker rejected requests'],
+      ['circuit_breaker.latency', 'histogram', 'Circuit breaker operation latency (ms)'],
+      // Model Router metrics
+      ['model_router.decisions_total', 'counter', 'Total model routing decisions'],
+      // Warm Pool metrics
+      ['warm_pool.hits', 'counter', 'Warm pool cache hits'],
+      ['warm_pool.misses', 'counter', 'Warm pool cache misses'],
+      ['warm_pool.created', 'counter', 'Warm pool chats created'],
+    ];
 
     for (const [name, type, help] of defaults) {
       this.metrics.set(name, {

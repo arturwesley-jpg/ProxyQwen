@@ -1,96 +1,103 @@
-export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+import pino, { Logger as PinoLogger, Level, LogDescriptor } from 'pino';
+import { config } from './config.js';
 
-export interface LogEntry {
-  timestamp: Date;
-  level: LogLevel;
-  message: string;
-  context?: string;
-  data?: Record<string, unknown>;
+export type LogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal';
+
+export interface Logger {
+  trace(message: string, data?: Record<string, unknown>): void;
+  debug(message: string, data?: Record<string, unknown>): void;
+  info(message: string, data?: Record<string, unknown>): void;
+  warn(message: string, data?: Record<string, unknown>): void;
+  error(message: string, data?: Record<string, unknown>): void;
+  fatal(message: string, data?: Record<string, unknown>): void;
+  child(context: string): Logger;
 }
 
-export class Logger {
-  private minLevel: LogLevel;
-  private context?: string;
-  
-  constructor(level: LogLevel = 'info', context?: string) {
-    this.minLevel = level;
-    this.context = context;
-  }
+class PinoWrapper implements Logger {
+  private logger: PinoLogger;
 
-  private shouldLog(level: LogLevel): boolean {
-    const levels: LogLevel[] = ['debug', 'info', 'warn', 'error'];
-    return levels.indexOf(level) >= levels.indexOf(this.minLevel);
-  }
+  constructor() {
+    const isProduction = process.env.NODE_ENV === 'production';
+    const logLevel = (process.env.LOG_LEVEL || 'info') as Level;
 
-  private formatEntry(entry: LogEntry): string {
-    const timestamp = entry.timestamp.toISOString();
-    const pad = (str: string): string => str.padStart(5, ' ');
-    const colorCode = (
-      entry.level === 'error' ? '\x1b[31m' :
-      entry.level === 'warn' ? '\x1b[33m' :
-      entry.level === 'debug' ? '\x1b[36m' : ''
-    );
-    const reset = '\x1b[0m';
-    
-    const coloredLevel = colorCode + pad(entry.level.toUpperCase()) + reset;
-    const contextPart = entry.context ? ` [${entry.context}]` : '';
-    
-    let output = `${timestamp} ${coloredLevel}${contextPart} ${entry.message}`;
-    
-    if (entry.data) {
-      output += '\n' + JSON.stringify(entry.data, null, 2);
-    }
-    
-    return output;
-  }
+    const transportTargets: Array<{
+      target: string;
+      level: string;
+      options: { destination: number | string; colorize?: boolean; translateTime?: string; ignore?: string; mkdir?: boolean };
+    }> = [
+      {
+        target: 'pino/file',
+        level: logLevel,
+        options: {
+          destination: 1, // stdout
+          colorize: !isProduction,
+          translateTime: 'SYS:standard',
+          ignore: 'pid,hostname',
+        },
+      },
+    ];
 
-  debug(message: string, data?: Record<string, unknown>): void {
-    if (this.shouldLog('debug')) {
-      console.log(this.formatEntry({
-        timestamp: new Date(),
-        level: 'debug',
-        message: this.context ? `[${this.context}] ${message}` : message,
-        data,
-      }));
-    }
-  }
-
-  info(message: string, data?: Record<string, unknown>): void {
-    if (this.shouldLog('info')) {
-      console.log(this.formatEntry({
-        timestamp: new Date(),
+    // Add file transport for production
+    if (isProduction) {
+      transportTargets.push({
+        target: 'pino/file',
         level: 'info',
-        message: this.context ? `[${this.context}] ${message}` : message,
-        data,
-      }));
-    }
-  }
-
-  warn(message: string, data?: Record<string, unknown>): void {
-    if (this.shouldLog('warn')) {
-      console.warn(this.formatEntry({
-        timestamp: new Date(),
-        level: 'warn',
-        message: this.context ? `[${this.context}] ${message}` : message,
-        data,
-      }));
-    }
-  }
-
-  error(message: string, data?: Record<string, unknown>): void {
-    if (this.shouldLog('error')) {
-      console.error(this.formatEntry({
-        timestamp: new Date(),
+        options: {
+          destination: './logs/app.log',
+          mkdir: true,
+        },
+      });
+      transportTargets.push({
+        target: 'pino/file',
         level: 'error',
-        message: this.context ? `[${this.context}] ${message}` : message,
-        data,
-      }));
+        options: {
+          destination: './logs/error.log',
+          mkdir: true,
+        },
+      });
     }
+
+    this.logger = pino({
+      level: logLevel,
+      formatters: {
+        level: (label) => ({ level: label }),
+      },
+      timestamp: pino.stdTimeFunctions.isoTime,
+      base: {
+        service: 'qwenproxy',
+        version: process.env.npm_package_version || '1.3.0',
+      },
+    }, pino.transport({ targets: transportTargets }));
   }
+
+  private log(level: LogLevel, message: string, data?: Record<string, unknown>): void {
+    const logObj: LogDescriptor = { msg: message };
+    if (data) Object.assign(logObj, data);
+    this.logger[level](logObj);
+  }
+
+  trace(message: string, data?: Record<string, unknown>): void { this.log('trace', message, data); }
+  debug(message: string, data?: Record<string, unknown>): void { this.log('debug', message, data); }
+  info(message: string, data?: Record<string, unknown>): void { this.log('info', message, data); }
+  warn(message: string, data?: Record<string, unknown>): void { this.log('warn', message, data); }
+  error(message: string, data?: Record<string, unknown>): void { this.log('error', message, data); }
+  fatal(message: string, data?: Record<string, unknown>): void { this.log('fatal', message, data); }
 
   child(context: string): Logger {
-    return new Logger(this.minLevel, this.context ? `${this.context}.${context}` : context);
+    const childLogger = this.logger.child({ context });
+    const wrapper = Object.create(PinoWrapper.prototype);
+    wrapper.logger = childLogger;
+    return wrapper;
+  }
+
+  getPino(): PinoLogger {
+    return this.logger;
   }
 }
 
-export const logger = new Logger('info');
+export const logger = new PinoWrapper();
+
+// Backwards compatibility
+export function createLogger(level: LogLevel = 'info', context?: string): Logger {
+  return logger.child(context || '');
+}

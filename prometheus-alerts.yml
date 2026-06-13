@@ -1,0 +1,120 @@
+groups:
+  - name: qwenproxy-alerts
+    interval: 30s
+    rules:
+      # High latency alerts
+      - alert: QwenProxyHighLatencyP99
+        expr: histogram_quantile(0.99, sum(rate(latency_request_bucket[5m])) by (le)) > 30000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "QwenProxy P99 latency > 30s"
+          description: "P99 latency is {{ $value }}ms, exceeding 30s threshold"
+
+      - alert: QwenProxyHighLatencyP50
+        expr: histogram_quantile(0.50, sum(rate(latency_request_bucket[5m])) by (le)) > 10000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "QwenProxy P50 latency > 10s"
+          description: "P50 latency is {{ $value }}ms"
+
+      # Error rate alerts
+      - alert: QwenProxyHighErrorRate
+        expr: sum(rate(requests_errors[5m])) / sum(rate(requests_total[5m])) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "QwenProxy error rate > 5%"
+          description: "Error rate is {{ $value | humanizePercentage }}"
+
+      # Circuit breaker alerts
+      - alert: QwenProxyCircuitBreakerOpen
+        expr: circuit_breaker_state{name=~"qwen.*"} == 2
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Circuit breaker OPEN for {{ $labels.name }}"
+          description: "Circuit breaker {{ $labels.name }} has been OPEN for > 1m"
+
+      - alert: QwenProxyCircuitBreakerHalfOpen
+        expr: circuit_breaker_state{name=~"qwen.*"} == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Circuit breaker HALF_OPEN for {{ $labels.name }}"
+          description: "Circuit breaker {{ $labels.name }} stuck in HALF_OPEN"
+
+      # Rate limiter alerts
+      - alert: QwenProxyRateLimiterExhausted
+        expr: rate_limiter_global_tokens < 50
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Global rate limiter tokens low"
+          description: "Only {{ $value }} tokens remaining globally"
+
+      - alert: QwenProxyAccountRateLimiterExhausted
+        expr: rate_limiter_account_tokens < 2
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Account rate limiter exhausted"
+          description: "Account {{ $labels.accountId }} has {{ $value }} tokens remaining"
+
+      # Memory alerts
+      - alert: QwenProxyHighMemoryUsage
+        expr: memory_heap_used / memory_heap_total > 0.85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "QwenProxy memory usage > 85%"
+          description: "Heap usage is {{ $value | humanizePercentage }}"
+
+      # Cache alerts
+      - alert: QwenProxyLowCacheHitRate
+        expr: cache_hit / (cache_hit + cache_miss) < 0.1
+        for: 10m
+        labels:
+          severity: info
+        annotations:
+          summary: "Cache hit rate < 10%"
+          description: "Semantic cache hit rate is {{ $value | humanizePercentage }}"
+
+      # Lock contention alerts
+      - alert: QwenProxyHighLockContention
+        expr: locks_contention_rate_per_mille / 1000 > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High lock contention > 50%"
+          description: "Lock contention rate is {{ $value | humanizePercentage }}"
+
+      # Stream/connection alerts
+      - alert: QwenProxyTooManyStreams
+        expr: streams_active > 80
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Too many active streams"
+          description: "{{ $value }} active SSE streams"
+
+      # Warm pool alerts
+      - alert: QwenProxyWarmPoolEmpty
+        expr: warm_pool_hits == 0 and warm_pool_misses > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Warm pool not being used"
+          description: "No warm pool hits but {{ $value }} misses"

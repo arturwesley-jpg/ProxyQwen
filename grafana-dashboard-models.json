@@ -1,0 +1,152 @@
+{
+  "dashboard": {
+    "editable": true,
+    "fiscalYearStartMonth": 0,
+    "graphTooltip": 0,
+    "id": null,
+    "links": [],
+    "liveNow": false,
+    "panels": [
+      {
+        "datasource": "Prometheus",
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "palette-classic"},
+            "custom": {"lineWidth": 1},
+            "mappings": [],
+            "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]},
+            "unit": "ms"
+          },
+          "overrides": []
+        },
+        "gridPos": {"h": 10, "w": 24, "x": 0, "y": 0},
+        "id": 1,
+        "options": {"legend": {"calcs": ["mean", "max", "min"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "single"}},
+        "pluginVersion": "8.0.0",
+        "targets": [
+          {"expr": "histogram_quantile(0.50, sum(rate(circuit_breaker_latency_bucket{name=~\"qwen.*\"}[5m])) by (le, name))", "legendFormat": "{{name}} P50", "refId": "A"},
+          {"expr": "histogram_quantile(0.95, sum(rate(circuit_breaker_latency_bucket{name=~\"qwen.*\"}[5m])) by (le, name))", "legendFormat": "{{name}} P95", "refId": "B"}
+        ],
+        "title": "Latency by Model/Circuit Breaker",
+        "type": "timeseries"
+      },
+      {
+        "datasource": "Prometheus",
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "thresholds"},
+            "mappings": [],
+            "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 50}, {"color": "red", "value": 80}]},
+            "unit": "percentunit"
+          },
+          "overrides": []
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 10},
+        "id": 2,
+        "options": {"orientation": "auto", "reduceOptions": {"values": false, "calcs": ["lastNotNull"]}, "showThresholdLabels": false, "showThresholdMarkers": true},
+        "pluginVersion": "8.0.0",
+        "targets": [{"expr": "sum(rate(circuit_breaker_failure{name=~\"qwen.*\"}[5m])) by (name) / sum(rate(circuit_breaker_requests{name=~\"qwen.*\"}[5m])) by (name) * 100", "legendFormat": "{{name}}", "refId": "A"}],
+        "title": "Failure Rate by Model (%)",
+        "type": "gauge"
+      },
+      {
+        "datasource": "Prometheus",
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "palette-classic"},
+            "custom": {"lineWidth": 1},
+            "mappings": [],
+            "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]},
+            "unit": "short"
+          },
+          "overrides": []
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 10},
+        "id": 3,
+        "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "single"}},
+        "pluginVersion": "8.0.0",
+        "targets": [{"expr": "sum(circuit_breaker_rejected{name=~\"qwen.*\"}) by (name)", "legendFormat": "{{name}}", "refId": "A"}],
+        "title": "Rejected Requests by Model",
+        "type": "timeseries"
+      },
+      {
+        "datasource": "Prometheus",
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "palette-classic"},
+            "custom": {"lineWidth": 1},
+            "mappings": [],
+            "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]},
+            "unit": "short"
+          },
+          "overrides": []
+        },
+        "gridPos": {"h": 10, "w": 24, "x": 0, "y": 18},
+        "id": 4,
+        "options": {"legend": {"calcs": ["lastNotNull", "mean"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "single"}},
+        "pluginVersion": "8.0.0",
+        "targets": [
+          {"expr": "histogram_quantile(0.50, sum(rate(rate_limiter_latency_bucket[5m])) by (le, level)) * 1000", "legendFormat": "{{level}} P50", "refId": "A"},
+          {"expr": "histogram_quantile(0.99, sum(rate(rate_limiter_latency_bucket[5m])) by (le, level)) * 1000", "legendFormat": "{{level}} P99", "refId": "B"}
+        ],
+        "title": "Rate Limiter Check Latency",
+        "type": "timeseries"
+      },
+      {
+        "datasource": "Prometheus",
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "palette-classic"},
+            "custom": {"lineWidth": 1},
+            "mappings": [],
+            "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]},
+            "unit": "short"
+          },
+          "overrides": []
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 28},
+        "id": 5,
+        "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "single"}},
+        "pluginVersion": "8.0.0",
+        "targets": [{"expr": "model_router_decisions_total", "legendFormat": "{{model}}", "refId": "A"}],
+        "title": "Model Router Decisions",
+        "type": "timeseries"
+      },
+      {
+        "datasource": "Prometheus",
+        "fieldConfig": {
+          "defaults": {
+            "color": {"mode": "palette-classic"},
+            "custom": {"lineWidth": 1},
+            "mappings": [],
+            "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]},
+            "unit": "short"
+          },
+          "overrides": []
+        },
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 28},
+        "id": 6,
+        "options": {"legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"}, "tooltip": {"mode": "single"}},
+        "pluginVersion": "8.0.0",
+        "targets": [
+          {"expr": "warm_pool_hits", "legendFormat": "Hits", "refId": "A"},
+          {"expr": "warm_pool_misses", "legendFormat": "Misses", "refId": "B"},
+          {"expr": "warm_pool_created", "legendFormat": "Created", "refId": "C"}
+        ],
+        "title": "Warm Pool Performance",
+        "type": "timeseries"
+      }
+    ],
+    "refresh": "10s",
+    "schemaVersion": 38,
+    "style": "dark",
+    "tags": ["qwenproxy", "models", "performance"],
+    "templating": {"list": []},
+    "time": {"from": "now-1h", "to": "now"},
+    "timepicker": {},
+    "timezone": "",
+    "title": "QwenProxy - Model Performance",
+    "uid": "qwenproxy-models",
+    "version": 1
+  }
+}

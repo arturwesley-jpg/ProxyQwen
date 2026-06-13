@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """
-Benchmark: Test 8 main models with 4 messages each using 8 accounts in parallel
+Benchmark: Test the 8 specific Qwen models with 4 messages each using 8 accounts in parallel
 """
 
 import asyncio
 import json
 import time
 import statistics
+import gzip
 from dataclasses import dataclass
 from typing import List, Dict
-import sys
+import aiohttp
 
 # Configuration
 BASE_URL = "http://localhost:3000"
-API_KEY = "qwenproxy-secret-key-2026"
+API_KEY = "qwenpr...et"  # Truncated for security
+
 # 8 accounts with their IDs from the database
 ACCOUNTS = [
     {"id": "bd6d7b5a-e77e-4725-91ee-7ec9bee925dc", "email": "asdf20022026@outlook.com"},
@@ -26,16 +28,16 @@ ACCOUNTS = [
     {"id": "b8c03c82-e778-4ab2-a713-a6955540096a", "email": "zxh00012026@outlook.com"},
 ]
 
-# 8 Main models to test (the primary Qwen models)
+# 8 Main models to test (the primary Qwen models as requested)
 MODELS = [
     "qwen3.7-plus",
+    "qwen3.7-plus-no-thinking",
     "qwen3.7-max",
+    "qwen3.7-max-no-thinking",
     "qwen3.6-plus",
-    "qwen3.6-27b",
-    "qwen3.5-plus",
-    "qwen3.5-flash",
-    "qwen3-coder-plus",
-    "qwen3-vl-plus",
+    "qwen3.6-plus-no-thinking",
+    "qwen3.6-max-preview",
+    "qwen3.6-max-preview-no-thinking",
 ]
 
 # 4 test messages per model
@@ -58,12 +60,9 @@ class BenchmarkResult:
     content_length: int
     error: str = ""
 
-async def send_request(session_url: str, model: str, message: str, account: dict, msg_idx: int, model_idx: int) -> BenchmarkResult:
+async def send_request(session: aiohttp.ClientSession, model: str, message: str, account: dict, msg_idx: int, model_idx: int) -> BenchmarkResult:
     """Send a single request to the chat completions endpoint."""
-    import aiohttp
-    import gzip
-    
-    url = f"{session_url}/v1/chat/completions"
+    url = f"{BASE_URL}/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json",
@@ -76,47 +75,34 @@ async def send_request(session_url: str, model: str, message: str, account: dict
         "messages": [{"role": "user", "content": message}],
         "stream": False,
     }
-    
+
     start = time.perf_counter()
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=60)) as resp:
-                raw_body = await resp.read()
-                elapsed = (time.perf_counter() - start) * 1000
-                
-                # Handle gzip response
-                if len(raw_body) >= 2 and raw_body[:2] == b'\x1f\x8b':
-                    body = gzip.decompress(raw_body).decode('utf-8')
-                else:
-                    body = raw_body.decode('utf-8')
-                
-                if resp.status == 200:
-                    try:
-                        data = json.loads(body)
-                        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                        return BenchmarkResult(
-                            model=model,
-                            account_id=account["id"],
-                            account_email=account["email"],
-                            message=message,
-                            success=True,
-                            response_time_ms=elapsed,
-                            status_code=resp.status,
-                            content_length=len(content),
-                        )
-                    except json.JSONDecodeError as e:
-                        return BenchmarkResult(
-                            model=model,
-                            account_id=account["id"],
-                            account_email=account["email"],
-                            message=message,
-                            success=False,
-                            response_time_ms=elapsed,
-                            status_code=resp.status,
-                            content_length=0,
-                            error=f"JSON decode error: {e}",
-                        )
-                else:
+        async with session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+            raw_body = await resp.read()
+            elapsed = (time.perf_counter() - start) * 1000
+
+            # Handle gzip response
+            if len(raw_body) >= 2 and raw_body[:2] == b'\x1f\x8b':
+                body = gzip.decompress(raw_body).decode('utf-8')
+            else:
+                body = raw_body.decode('utf-8')
+
+            if resp.status == 200:
+                try:
+                    data = json.loads(body)
+                    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    return BenchmarkResult(
+                        model=model,
+                        account_id=account["id"],
+                        account_email=account["email"],
+                        message=message,
+                        success=True,
+                        response_time_ms=elapsed,
+                        status_code=resp.status,
+                        content_length=len(content),
+                    )
+                except json.JSONDecodeError as e:
                     return BenchmarkResult(
                         model=model,
                         account_id=account["id"],
@@ -126,8 +112,20 @@ async def send_request(session_url: str, model: str, message: str, account: dict
                         response_time_ms=elapsed,
                         status_code=resp.status,
                         content_length=0,
-                        error=body[:200],
+                        error=f"JSON decode error: {e}",
                     )
+            else:
+                return BenchmarkResult(
+                    model=model,
+                    account_id=account["id"],
+                    account_email=account["email"],
+                    message=message,
+                    success=False,
+                    response_time_ms=elapsed,
+                    status_code=resp.status,
+                    content_length=0,
+                    error=body[:200],
+                )
     except asyncio.TimeoutError:
         elapsed = (time.perf_counter() - start) * 1000
         return BenchmarkResult(
@@ -160,24 +158,27 @@ async def run_model_benchmark(model: str, model_idx: int) -> List[BenchmarkResul
     print(f"\n{'='*60}")
     print(f"Testing model: {model}")
     print(f"{'='*60}")
+
+    connector = aiohttp.TCPConnector(limit=20)
+    timeout = aiohttp.ClientTimeout(total=60)
     
-    tasks = []
-    for i, message in enumerate(TEST_MESSAGES):
-        # Distribute messages across accounts (round-robin)
-        account = ACCOUNTS[i % len(ACCOUNTS)]
-        task = send_request(BASE_URL, model, message, account, i, model_idx)
-        tasks.append(task)
-    
-    # Run all 4 requests in parallel (limited by account locks)
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    
+    async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+        tasks = []
+        for i, message in enumerate(TEST_MESSAGES):
+            # Distribute messages across accounts (round-robin)
+            account = ACCOUNTS[i % len(ACCOUNTS)]
+            task = send_request(session, model, message, account, i, model_idx)
+            tasks.append(task)
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
     valid_results = []
     for r in results:
         if isinstance(r, BenchmarkResult):
             valid_results.append(r)
         else:
             print(f"  ERROR: {r}")
-    
+
     return valid_results
 
 async def main():
@@ -186,13 +187,13 @@ async def main():
     print(f"Accounts: {len(ACCOUNTS)}")
     print(f"Models: {len(MODELS)}")
     print(f"Messages per model: {len(TEST_MESSAGES)}")
-    
+
     all_results = []
-    
+
     for model_idx, model in enumerate(MODELS):
         results = await run_model_benchmark(model, model_idx)
         all_results.extend(results)
-        
+
         # Quick summary for this model
         successful = [r for r in results if r.success]
         if successful:
@@ -203,10 +204,10 @@ async def main():
             print(f"  ✗ All failed")
             for r in results:
                 print(f"    {r.account_email[:20]}: {r.error[:80]}")
-        
+
         # Delay between models to avoid rate limits and let locks clear
         await asyncio.sleep(5)
-    
+
     # Save detailed results to CSV
     csv_path = f"benchmark_results_{int(time.time())}.csv"
     with open(csv_path, "w") as f:
@@ -214,33 +215,33 @@ async def main():
         for r in all_results:
             f.write(f'"{r.model}","{r.account_id}","{r.account_email}","{r.message}",{r.success},{r.response_time_ms:.0f},{r.status_code},{r.content_length},"{r.error}"\n')
     print(f"\n📊 Detailed results saved to: {csv_path}")
-    
+
     # Overall summary
     print(f"\n{'='*60}")
     print("OVERALL SUMMARY")
     print(f"{'='*60}")
-    
+
     successful_results = [r for r in all_results if r.success]
     print(f"Total requests: {len(all_results)}")
     print(f"Successful: {len(successful_results)}")
     print(f"Failed: {len(all_results) - len(successful_results)}")
-    
+
     if successful_results:
         by_model: Dict[str, List[float]] = {}
         for r in successful_results:
             if r.model not in by_model:
                 by_model[r.model] = []
             by_model[r.model].append(r.response_time_ms)
-        
-        print(f"\n{'Model':<30} {'Requests':>8} {'Avg (ms)':>10} {'Min (ms)':>10} {'Max (ms)':>10}")
-        print("-" * 70)
+
+        print(f"\n{'Model':<35} {'Requests':>8} {'Avg (ms)':>10} {'Min (ms)':>10} {'Max (ms)':>10}")
+        print("-" * 75)
         for model in MODELS:
             if model in by_model:
                 times = by_model[model]
-                print(f"{model:<30} {len(times):>8} {statistics.mean(times):>10.0f} {min(times):>10.0f} {max(times):>10.0f}")
+                print(f"{model:<35} {len(times):>8} {statistics.mean(times):>10.0f} {min(times):>10.0f} {max(times):>10.0f}")
             else:
-                print(f"{model:<30} {'N/A':>8}")
-        
+                print(f"{model:<35} {'N/A':>8}")
+
         # Overall stats
         all_times = [r.response_time_ms for r in successful_results]
         print(f"\nOverall average: {statistics.mean(all_times):.0f}ms")

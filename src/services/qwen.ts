@@ -4,6 +4,8 @@ import { getQwenAgent } from '../core/http-client.js';
 import crypto from 'crypto';
 // Auto-reauth for expired cookies
 import { reauthenticateAccount, shouldTriggerReauth } from '../core/auto-reauth.js';
+// Warm Pool Manager (Phase 1)
+import { warmPoolManager } from './warm-pool.js';
 
 const CACHED_TIMEZONE = new Date().toString().split(' (')[0];
 const BASE_TIMEOUT_MS = 120000;
@@ -110,7 +112,7 @@ async function getBasicQwenHeaders(accountId?: string): Promise<Record<string, s
   };
 }
 
-async function createRealQwenChat(header: Record<string, string>): Promise<string> {
+export async function createRealQwenChat(header: Record<string, string>): Promise<string> {
   const response = await fetch('https://chat.qwen.ai/api/v2/chats/new', {
     method: 'POST',
     headers: {
@@ -202,13 +204,23 @@ async function refillPoolForAccount(accountId: string) {
 }
 
 export async function getWarmedChat(accountId?: string) {
-  // DISABLED: Warm pool disabled to prevent hammering Qwen API
-  // Returns null to force direct chat creation via createRealQwenChat
-  return null as any;
+  const key = accountId || 'global';
+  const result = await warmPoolManager.acquire(key);
+  // warmPoolManager.acquire returns { chatId, headers, fromPool }
+  // We need to return the old WarmPoolEntry format for backward compat
+  return {
+    chatId: result.chatId,
+    headers: result.headers,
+    accountId: key,
+    timestamp: Date.now(),
+  };
 }
 
 export async function warmAllPools(accountIds: string[]) {
-  for (const id of accountIds) refillPoolForAccount(id).catch(() => {});
+  for (const id of accountIds) {
+    // Trigger refill for each account
+    warmPoolManager.forceRefill(id).catch(() => {});
+  }
 }
 
 export interface QwenMessage {
@@ -388,18 +400,14 @@ export interface QwenFileEntry {
  * Retorna snapshot do warm pool (contagem por conta) — usado pelo endpoint /v1/warm-pool/status
  */
 export function getWarmPoolSnapshot(): Record<string, { size: number; oldestMs: number | null }> {
+  const snapshot = warmPoolManager.getSnapshot();
   const result: Record<string, { size: number; oldestMs: number | null }> = {};
-  const now = Date.now();
-  for (const [accountId, entries] of warmPool.entries()) {
-    if (entries.length === 0) {
-      result[accountId] = { size: 0, oldestMs: null };
-    } else {
-      const oldest = Math.min(...entries.map(e => e.timestamp));
-      result[accountId] = {
-        size: entries.length,
-        oldestMs: now - oldest,
-      };
-    }
+  
+  for (const [accountId, data] of Object.entries(snapshot)) {
+    result[accountId] = {
+      size: data.healthy,
+      oldestMs: data.oldestMs,
+    };
   }
   return result;
 }
@@ -416,7 +424,9 @@ export async function createQwenStream(
 ): Promise<{ stream: ReadableStream, headers: Record<string, string>, uiSessionId: string, controller: AbortController, accountId: string, chatId: string }> {
   let chatId: string;
   let chatHeaders: Record<string, string>;
-  
+  const accountKey = accountId || 'global';
+  let fromPool = false;
+
   if (existingChatId) {
     try {
       const basicHeaders = await getBasicHeaders(accountId);
@@ -439,15 +449,12 @@ export async function createQwenStream(
       console.log(`[Qwen] Created new chat: ${chatId}`);
     }
   } else {
-    // Warm pool is disabled - create chat directly
-    const basicHeaders = await getBasicHeaders(accountId);
-    chatHeaders = {
-      cookie: basicHeaders.cookie,
-      'user-agent': basicHeaders.userAgent,
-      'bx-v': basicHeaders.bxV,
-    };
-    chatId = await createRealQwenChat(chatHeaders);
-    console.log(`[Qwen] Created new chat: ${chatId}`);
+    // Acquire from warm pool (or create new if pool empty)
+    const acquired = await warmPoolManager.acquire(accountKey);
+    chatId = acquired.chatId;
+    chatHeaders = acquired.headers;
+    fromPool = acquired.fromPool;
+    console.log(`[Qwen] ${fromPool ? 'Acquired from warm pool' : 'Created new chat'}: ${chatId} (account: ${accountKey})`);
   }
   const actualParentId: string | null = null;
 
@@ -647,7 +654,32 @@ export async function createQwenStream(
     throw new Error(`Failed to fetch from Qwen: ${response.status} ${response.statusText} - ${errText}`);
   }
 
-  return { stream: response.body, headers: chatHeaders, uiSessionId: chatId, controller, accountId: accountId || 'global', chatId };
+  // Wrap stream to release chat back to pool on completion
+  const wrappedStream = new ReadableStream({
+    async start(controller) {
+      const reader = response.body!.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          controller.enqueue(value);
+        }
+        controller.close();
+        // Success - return chat to pool
+        await warmPoolManager.release(accountKey, chatId, chatHeaders);
+        console.log(`[Qwen] Stream completed, chat returned to pool: ${chatId}`);
+      } catch (err) {
+        // Error - mark chat as unhealthy
+        console.error(`[Qwen] Stream error, marking chat unhealthy: ${chatId}`, err);
+        warmPoolManager.markUnhealthy(accountKey, chatId);
+        controller.error(err);
+      } finally {
+        reader.releaseLock();
+      }
+    },
+  });
+
+  return { stream: wrappedStream, headers: chatHeaders, uiSessionId: chatId, controller, accountId: accountKey, chatId };
 }
 
 // ============================================================
@@ -670,12 +702,12 @@ export async function startAutoReauthChecker(): Promise<void> {
         if (!account.email || !account.password) continue;
         
         const key = account.id;
-        const pool = warmPool.get(key);
-        const poolSize = pool?.length || 0;
+        const snapshot = warmPoolManager.getSnapshot(key);
+        const poolSize = snapshot[key]?.healthy || 0;
         
         // If pool is empty or shrinking, might indicate cookie issues
         // Only check if pool exists (account has been initialized)
-        if (pool && poolSize < 5) {
+        if (poolSize > 0 && poolSize < 5) {
           console.log(`[AutoReauth] Pool low for ${account.email} (size: ${poolSize}), checking...`);
           
           // Try to get headers to verify cookies work

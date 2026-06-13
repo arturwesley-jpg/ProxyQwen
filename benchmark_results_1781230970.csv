@@ -1,0 +1,73 @@
+model,account_id,account_email,message,success,response_time_ms,status_code,content_length,error
+"qwen3.7-plus","bd6d7b5a-e77e-4725-91ee-7ec9bee925dc","asdf20022026@outlook.com","What is Python? Brief answer.",False,60862,408,0,"Timeout"
+"qwen3.7-plus","e091f929-a055-4a12-b219-4bd57e7a05f2","geen.trid02@outlook.com","Explain async/await in JavaScript in 2 sentences.",False,60860,408,0,"Timeout"
+"qwen3.7-plus","aaec5962-4154-4db2-a3cf-51c7a65aa431","geen.trid03@outlook.com","Write a hello world function in Go.",False,60859,408,0,"Timeout"
+"qwen3.7-plus","565ed9a3-a43b-4477-9060-1dfb7042990d","wsxcderfvv1@outlook.com","What is the capital of Brazil?",False,60858,408,0,"Timeout"
+"qwen3.7-max","bd6d7b5a-e77e-4725-91ee-7ec9bee925dc","asdf20022026@outlook.com","What is Python? Brief answer.",False,60994,408,0,"Timeout"
+"qwen3.7-max","e091f929-a055-4a12-b219-4bd57e7a05f2","geen.trid02@outlook.com","Explain async/await in JavaScript in 2 sentences.",False,60994,408,0,"Timeout"
+"qwen3.7-max","aaec5962-4154-4db2-a3cf-51c7a65aa431","geen.trid03@outlook.com","Write a hello world function in Go.",False,60994,408,0,"Timeout"
+"qwen3.7-max","565ed9a3-a43b-4477-9060-1dfb7042990d","wsxcderfvv1@outlook.com","What is the capital of Brazil?",False,60994,408,0,"Timeout"
+"qwen3.6-plus","bd6d7b5a-e77e-4725-91ee-7ec9bee925dc","asdf20022026@outlook.com","What is Python? Brief answer.",False,60995,408,0,"Timeout"
+"qwen3.6-plus","e091f929-a055-4a12-b219-4bd57e7a05f2","geen.trid02@outlook.com","Explain async/await in JavaScript in 2 sentences.",False,60995,408,0,"Timeout"
+"qwen3.6-plus","aaec5962-4154-4db2-a3cf-51c7a65aa431","geen.trid03@outlook.com","Write a hello world function in Go.",False,60994,408,0,"Timeout"
+"qwen3.6-plus","565ed9a3-a43b-4477-9060-1dfb7042990d","wsxcderfvv1@outlook.com","What is the capital of Brazil?",False,60994,408,0,"Timeout"
+"qwen3.6-27b","bd6d7b5a-e77e-4725-91ee-7ec9bee925dc","asdf20022026@outlook.com","What is Python? Brief answer.",False,11692,0,0,"[Errno 104] Connection reset by peer"
+"qwen3.6-27b","e091f929-a055-4a12-b219-4bd57e7a05f2","geen.trid02@outlook.com","Explain async/await in JavaScript in 2 sentences.",False,11691,0,0,"[Errno 104] Connection reset by peer"
+"qwen3.6-27b","aaec5962-4154-4db2-a3cf-51c7a65aa431","geen.trid03@outlook.com","Write a hello world function in Go.",False,11691,0,0,"[Errno 104] Connection reset by peer"
+"qwen3.6-27b","565ed9a3-a43b-4477-9060-1dfb7042990d","wsxcderfvv1@outlook.com","What is the capital of Brazil?",False,11691,0,0,"[Errno 104] Connection reset by peer"
+"qwen3.5-plus","bd6d7b5a-e77e-4725-91ee-7ec9bee925dc","asdf20022026@outlook.com","What is Python? Brief answer.",False,51,404,0,"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Error</title>
+</head>
+<body>
+<pre>Cannot POST /v1/chat/completions</pre>
+</body>
+</html>
+"
+"qwen3.5-plus","e091f929-a055-4a12-b219-4bd57e7a05f2","geen.trid02@outlook.com","Explain async/await in JavaScript in 2 sentences.",False,57,404,0,"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Error</title>
+</head>
+<body>
+<pre>Cannot POST /v1/chat/completions</pre>
+</body>
+</html>
+"
+"qwen3.5-plus","aaec5962-4154-4db2-a3cf-51c7a65aa431","geen.trid03@outlook.com","Write a hello world function in Go.",False,62,404,0,"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Error</title>
+</head>
+<body>
+<pre>Cannot POST /v1/chat/completions</pre>
+</body>
+</html>
+"
+"qwen3.5-plus","565ed9a3-a43b-4477-9060-1dfb7042990d","wsxcderfvv1@outlook.com","What is the capital of Brazil?",False,67,404,0,"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Error</title>
+</head>
+<body>
+<pre>Cannot POST /v1/chat/completions</pre>
+</body>
+</html>
+"
+"qwen3.5-flash","bd6d7b5a-e77e-4725-91ee-7ec9bee925dc","asdf20022026@outlook.com","What is Python? Brief answer.",False,3,0,0,"Cannot connect to host localhost:3000 ssl:default [Connect call failed ('127.0.0.1', 3000)]"
+"qwen3.5-flash","e091f929-a055-4a12-b219-4bd57e7a05f2","geen.trid02@outlook.com","Explain async/await in JavaScript in 2 sentences.",False,3,0,0,"Cannot connect to host localhost:3000 ssl:default [Connect call failed ('127.0.0.1', 3000)]"
+"qwen3.5-flash","aaec5962-4154-4db2-a3cf-51c7a65aa431","geen.trid03@outlook.com","Write a hello world function in Go.",False,2,0,0,"Cannot connect to host localhost:3000 ssl:default [Connect call failed ('127.0.0.1', 3000)]"
+"qwen3.5-flash","565ed9a3-a43b-4477-9060-1dfb7042990d","wsxcderfvv1@outlook.com","What is the capital of Brazil?",False,3,0,0,"Cannot connect to host localhost:3000 ssl:default [Connect call failed ('127.0.0.1', 3000)]"
+"qwen3-coder-plus","bd6d7b5a-e77e-4725-91ee-7ec9bee925dc","asdf20022026@outlook.com","What is Python? Brief answer.",False,8,0,0,"Cannot connect to host localhost:3000 ssl:default [Connect call failed ('127.0.0.1', 3000)]"
+"qwen3-coder-plus","e091f929-a055-4a12-b219-4bd57e7a05f2","geen.trid02@outlook.com","Explain async/await in JavaScript in 2 sentences.",False,6,0,0,"Cannot connect to host localhost:3000 ssl:default [Connect call failed ('127.0.0.1', 3000)]"
+"qwen3-coder-plus","aaec5962-4154-4db2-a3cf-51c7a65aa431","geen.trid03@outlook.com","Write a hello world function in Go.",False,6,0,0,"Cannot connect to host localhost:3000 ssl:default [Connect call failed ('127.0.0.1', 3000)]"
+"qwen3-coder-plus","565ed9a3-a43b-4477-9060-1dfb7042990d","wsxcderfvv1@outlook.com","What is the capital of Brazil?",False,5,0,0,"Cannot connect to host localhost:3000 ssl:default [Connect call failed ('127.0.0.1', 3000)]"
+"qwen3-vl-plus","bd6d7b5a-e77e-4725-91ee-7ec9bee925dc","asdf20022026@outlook.com","What is Python? Brief answer.",False,6,0,0,"Cannot connect to host localhost:3000 ssl:default [Connect call failed ('127.0.0.1', 3000)]"
+"qwen3-vl-plus","e091f929-a055-4a12-b219-4bd57e7a05f2","geen.trid02@outlook.com","Explain async/await in JavaScript in 2 sentences.",False,8,0,0,"Cannot connect to host localhost:3000 ssl:default [Connect call failed ('127.0.0.1', 3000)]"
+"qwen3-vl-plus","aaec5962-4154-4db2-a3cf-51c7a65aa431","geen.trid03@outlook.com","Write a hello world function in Go.",False,7,0,0,"Cannot connect to host localhost:3000 ssl:default [Connect call failed ('127.0.0.1', 3000)]"
+"qwen3-vl-plus","565ed9a3-a43b-4477-9060-1dfb7042990d","wsxcderfvv1@outlook.com","What is the capital of Brazil?",False,7,0,0,"Cannot connect to host localhost:3000 ssl:default [Connect call failed ('127.0.0.1', 3000)]"

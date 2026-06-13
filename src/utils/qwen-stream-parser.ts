@@ -9,7 +9,7 @@
  */
 
 import { updateSessionParent } from '../services/qwen.js';
-import { getIncrementalDelta } from '../routes/chat.js';
+import { getIncrementalDelta } from '../routes/chat/index.js';
 import { StreamingToolParser } from '../tools/parser.js';
 import type { FunctionToolDefinition } from '../tools/types.js';
 

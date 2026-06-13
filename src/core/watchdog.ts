@@ -8,6 +8,12 @@ interface HealthStatus {
   overall: 'healthy' | 'degraded' | 'unhealthy'
 }
 
+let shutdownCallback: ((signal?: string) => Promise<void>) | null = null
+
+export function setShutdownCallback(cb: (signal?: string) => Promise<void>) {
+  shutdownCallback = cb
+}
+
 export class Watchdog extends EventEmitter {
   private checkInterval: NodeJS.Timeout | null = null
   private consecutiveFailures: number = 0
@@ -84,6 +90,12 @@ export class Watchdog extends EventEmitter {
 
     try {
       if (status.ram === 'critical') {
+        if (config.watchdog.autoRestartOnCritical && shutdownCallback) {
+          console.warn('[Watchdog] Critical RAM - triggering graceful restart...')
+          await shutdownCallback()
+          // Process will be restarted by PM2
+          return
+        }
         await this.recoverRAM()
       }
       if (status.streams === 'blocked') {

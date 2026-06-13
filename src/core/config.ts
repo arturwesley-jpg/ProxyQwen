@@ -15,9 +15,9 @@ const envSchema = z.object({
   CACHE_TTL: z.string().default('3600'),
   RESPONSE_TTL: z.string().default('1800'),
   METRICS_INTERVAL: z.string().default('10000'),
-  WATCHDOG_INTERVAL: z.string().default('5000'),
-  WATCHDOG_FAILURES: z.string().default('3'),
-  RAM_WARNING: z.string().default('80'),
+  WATCHDOG_INTERVAL: z.string().default('30000'),
+  WATCHDOG_FAILURES: z.string().default('5'),
+  RAM_WARNING: z.string().default('85'),
   RAM_CRITICAL: z.string().default('95'),
   WS_WARNING: z.string().default('50'),
   WS_CRITICAL: z.string().default('100'),
@@ -25,6 +25,21 @@ const envSchema = z.object({
   QWEN_HTTP_ENDPOINT: z.string().default('https://api.qwen.ai/v1/chat'),
   QWEN_API_KEY: z.string().default(''),
   API_KEY: z.string().default(''),
+  // Rate Limiter
+  RATE_LIMIT_ACCOUNT_CAPACITY: z.string().default('10'),
+  RATE_LIMIT_ACCOUNT_REFILL: z.string().default('2'),
+  RATE_LIMIT_TENANT_CAPACITY: z.string().default('100'),
+  RATE_LIMIT_TENANT_REFILL: z.string().default('20'),
+  RATE_LIMIT_GLOBAL_CAPACITY: z.string().default('500'),
+  RATE_LIMIT_GLOBAL_REFILL: z.string().default('100'),
+  // Circuit Breaker
+  CIRCUIT_BREAKER_FAILURE_THRESHOLD: z.string().default('5'),
+  CIRCUIT_BREAKER_RESET_TIMEOUT: z.string().default('30000'),
+  CIRCUIT_BREAKER_SUCCESS_THRESHOLD: z.string().default('2'),
+  CIRCUIT_BREAKER_REQUEST_TIMEOUT: z.string().default('30000'),
+  CIRCUIT_BREAKER_MIN_REQUESTS: z.string().default('10'),
+  CIRCUIT_BREAKER_FAILURE_RATE: z.string().default('50'),
+  CIRCUIT_BREAKER_WINDOW_MS: z.string().default('60000'),
 })
 
 const env = envSchema.parse(process.env)
@@ -46,6 +61,15 @@ export const config = {
       '--no-first-run',
       '--no-zygote',
       '--disable-features=IsolateOrigins,site-per-process',
+      // Aggressive memory management
+      '--single-process',
+      '--no-sandbox',
+      '--js-flags=--max-old-space-size=512',
+      '--render-process-limit=2',
+      '--disable-site-isolation-trials',
+      '--disable-web-security',
+      '--disable-features=TranslateUI,BlinkGenPropertyTrees',
+      '--memory-pressure-off',
     ],
     launchTimeout: 30000,
     healthCheckInterval: 30000,
@@ -79,6 +103,32 @@ export const config = {
       warningThreshold: parseInt(env.WS_WARNING),
       criticalThreshold: parseInt(env.WS_CRITICAL),
     },
+    // Auto-restart on critical memory - handled by PM2 max_memory_restart instead
+    autoRestartOnCritical: false,
+    restartDelayMs: 30000,
+  },
+  rateLimiter: {
+    account: {
+      capacity: parseInt(env.RATE_LIMIT_ACCOUNT_CAPACITY),
+      refillRate: parseFloat(env.RATE_LIMIT_ACCOUNT_REFILL),
+    },
+    tenant: {
+      capacity: parseInt(env.RATE_LIMIT_TENANT_CAPACITY),
+      refillRate: parseFloat(env.RATE_LIMIT_TENANT_REFILL),
+    },
+    global: {
+      capacity: parseInt(env.RATE_LIMIT_GLOBAL_CAPACITY),
+      refillRate: parseFloat(env.RATE_LIMIT_GLOBAL_REFILL),
+    },
+  },
+  circuitBreaker: {
+    failureThreshold: parseInt(env.CIRCUIT_BREAKER_FAILURE_THRESHOLD),
+    resetTimeoutMs: parseInt(env.CIRCUIT_BREAKER_RESET_TIMEOUT),
+    successThreshold: parseInt(env.CIRCUIT_BREAKER_SUCCESS_THRESHOLD),
+    requestTimeoutMs: parseInt(env.CIRCUIT_BREAKER_REQUEST_TIMEOUT),
+    minimumRequests: parseInt(env.CIRCUIT_BREAKER_MIN_REQUESTS),
+    failureRateThreshold: parseInt(env.CIRCUIT_BREAKER_FAILURE_RATE),
+    windowMs: parseInt(env.CIRCUIT_BREAKER_WINDOW_MS),
   },
   apiKey: env.API_KEY,
   qwen: {
