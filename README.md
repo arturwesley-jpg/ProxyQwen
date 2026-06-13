@@ -302,6 +302,21 @@ custom_providers:
 
 ---
 
+## Correção: Extração de Tool Calls do Formato Malformado do Qwen 🔧
+
+**Problema**: Em respostas não-streaming, o Qwen retorna tool calls em formato malformado no campo `content`:
+```json
+{"{\\\"name\\\": \\\"calculatorname\\\": \\\"calculator\\\", \\\"arguments\\\":\\\", \\\"arguments\\\": {\\\"expression\\\": \\\" {\\\"expression\\\": \\\"2+2\\\"}\\\"}}2+2\\\"}
+```
+
+**Solução** (implementado em `src/routes/chat/stream.ts`):
+1. **StreamingToolParser integration** — Captura tool calls parciais durante o streaming (`onAnswer` callback)
+2. **Double-escape unescape** — Converte `\\\"` → `"` e `\\\\` → `\` para recuperar JSON válido
+3. **Proximity-based extraction** — Encontra nomes de tools conhecidos e busca `"expression": VALUE` próximo (janela de 500 chars)
+4. **JSON fallback** — Tenta `JSON.parse()` do valor da expression, fallback para `{ expression: value }`
+
+---
+
 ## Benchmarks Validados 📊
 
 | Modelo | Latência Média | Tipo |
