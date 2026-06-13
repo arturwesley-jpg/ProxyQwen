@@ -211,7 +211,112 @@ services:
 
 ---
 
-## Estrutura do Projeto
+## Execução Multi-Agente Paralela (S1+S2) ⚡
+
+O QwenProxy suporta **execução paralela real de múltiplos agentes** via header `X-Account-Id`, permitindo que cada subagente use sua própria conta Qwen dedicada — eliminando contenção e permitindo throughput linear.
+
+### Como Funciona
+
+```
+Hermes/Cliente → X-Account-Id: qwen-acc-01 → Conta: asdf20022026 (bd6d7b5a)
+Hermes/Cliente → X-Account-Id: qwen-acc-02 → Conta: geen.trid02 (e091f929)
+...
+Hermes/Cliente → X-Account-Id: qwen-acc-08 → Conta: zxh00012026 (b8c03c82)
+```
+
+- **8 contas Outlook** = **8 slots paralelos máximos**
+- **Account Pinning**: Cada requisição com `X-Account-Id` fixa na conta (FIFO queue, 30s timeout → 429)
+- **Rotating Mode**: Sem header, round-robin com fail-fast para próxima conta livre
+- **Mutex por conta**: `src/core/account-lock.ts` — Promise mutex com fila FIFO
+- **Monitoramento**: `GET /v1/accounts/locks` mostra locks ativos
+
+### Configuração Hermes (config-multiagent-snippet.yaml)
+
+```yaml
+custom_providers:
+  - name: qwen-acc-01
+    api_base: "http://SEU_VPS:3000/v1"
+    api_key: "${API_KEY}"
+    extra_headers:
+      X-Account-Id: "qwen-acc-01"
+  - name: qwen-acc-02
+    api_base: "http://SEU_VPS:3000/v1"
+    api_key: "${API_KEY}"
+    extra_headers:
+      X-Account-Id: "qwen-acc-02"
+  # ... até qwen-acc-08
+```
+
+> Arquivos prontos: `~/.hermes/config-multiagent-snippet.yaml` e `~/.hermes/qwenproxy-accounts-map.txt`
+
+---
+
+## Otimizações de Performance (4 Fases) 🚀
+
+### 1. Warm Pool Manager (`src/services/warm-pool.ts`)
+- Pool de chats pré-aquecidos por conta (15 chats/conta)
+- Refill proativo + TTL 30min
+- Elimina cold-start latency
+
+### 2. Chat Route Decomposição
+`src/routes/chat.ts` → **7 módulos especializados** em `src/routes/chat/`:
+| Módulo | Responsabilidade |
+|--------|------------------|
+| `parser.ts` | Parse/validação de requests OpenAI |
+| `tool-mapper.ts` | Mapeamento de tool calls Qwen ↔ OpenAI |
+| `auth.ts` | Autenticação + account selection |
+| `session.ts` | Gestão de sessão Playwright |
+| `stream.ts` | Streaming SSE + tool call streaming |
+| `account-selector.ts` | Lógica pinned/rotating + lock |
+| `stop.ts` | Cancelamento de geração ativa |
+
+### 3. Semantic Cache HNSW O(log n) (`src/cache/semantic-cache-hnsw.ts`)
+- **SimHash 64-bit** + **HNSW (Hierarchical Navigable Small World)**
+- Busca approximate nearest neighbor em O(log n)
+- Cache hits retornam `prompt_tokens: 0` (economia real de tokens)
+- Persistência SQLite com batched writes
+
+### 4. Model Router Data-Driven (`src/core/model-router.ts`)
+- **Confidence scoring** por modelo/tarefa
+- **EMA metrics** (Exponential Moving Average) de latência/sucesso
+- **Async batched DB writes** (batch 10, flush 2s)
+- **A/B testing 10%** — exploração automática
+- **Fallback chain** — degradação graciosa
+
+---
+
+## Correção Crítica: Formato de Tool Calls 🔧
+
+**Problema**: Modelos Qwen geravam tool calls malformados:
+```json
+{"name":"terminal"}\n{"command":"ls"}
+```
+
+**Solução**: *Aggressive format reinforcement* no **FINAL do system prompt** (não no meio) para TODOS contextos com tools:
+- Exemplo de formato correto
+- Exemplos **proibidos** (malformados)
+- Regras numeradas de validação
+- Aplicado em `src/routes/chat.ts` linhas ~263-280
+
+> **Liçao**: "Lost in the Middle" — instruções de formatação no meio do prompt são ignoradas. **Sempre coloque no final**.
+
+---
+
+## Benchmarks Validados 📊
+
+| Modelo | Latência Média | Tipo |
+|--------|---------------|------|
+| `qwen3.6-plus-no-thinking` | **~2.9s** | Fast (no reasoning) |
+| `qwen3.6-plus` | ~8.5s | Thinking |
+| `qwen3.6-max` | ~12s | Thinking |
+
+- Modelos **no-thinking ~3x mais rápidos** que variants thinking
+- VPS proxy em `147.15.134.189:3001` requer header `Authorization: Bearer ***`
+- Commit `16d820f` contém S1+S2 + auto-reauth
+
+---
+
+## Estrutura do Projeto (Atualizada)
 
 ```
 ProxyQwen/
@@ -222,23 +327,37 @@ ProxyQwen/
 │   │   ├── models.ts            # Endpoints /v1/models
 │   │   └── server.ts            # Servidor Hono + startup
 │   ├── cache/
-│   │   └── memory-cache.ts      # Cache em memória com TTL
+│   │   ├── memory-cache.ts      # Cache em memória com TTL
+│   │   └── semantic-cache-hnsw.ts  # Semantic Cache HNSW O(log n)
 │   ├── core/
+│   │   ├── account-lock.ts      # Per-account Promise mutex (S1+S2)
 │   │   ├── account-manager.ts   # Rotação round-robin + cooldowns
 │   │   ├── accounts.ts          # CRUD de contas (SQLite)
+│   │   ├── circuit-breaker.ts   # Circuit breaker pattern
 │   │   ├── config.ts            # Configuração com Zod
 │   │   ├── database.ts          # Conexão e migrations SQLite
 │   │   ├── logger.ts            # Logger estruturado
 │   │   ├── metrics.ts           # Coleta de métricas
 │   │   ├── model-registry.ts    # Registro de modelos e context windows
+│   │   ├── model-router.ts      # Model Router data-driven
+│   │   ├── rate-limiter.ts      # Rate limiting por conta
 │   │   ├── stream-registry.ts   # Tracking de streams ativos
 │   │   └── watchdog.ts          # Health monitoring
 │   ├── routes/
-│   │   ├── chat.ts              # Handler /v1/chat/completions
+│   │   ├── chat/                # Handler decomposto em 7 módulos
+│   │   │   ├── index.ts         # Entry point + routing
+│   │   │   ├── parser.ts        # Parse/validação requests
+│   │   │   ├── tool-mapper.ts   # Mapeamento tool calls Qwen↔OpenAI
+│   │   │   ├── auth.ts          # Auth + account selection
+│   │   │   ├── session.ts       # Gestão sessão Playwright
+│   │   │   ├── stream.ts        # Streaming SSE + tool calls
+│   │   │   ├── account-selector.ts # Pinned/rotating logic
+│   │   │   └── stop.ts          # Cancelamento geração ativa
 │   │   └── upload.ts            # Handler /v1/upload (multimodal)
 │   ├── services/
 │   │   ├── playwright.ts        # Automação de navegador
-│   │   └── qwen.ts              # Integração com API do Qwen
+│   │   ├── qwen.ts              # Integração com API do Qwen
+│   │   └── warm-pool.ts         # Warm Pool Manager (15 chats/conta)
 │   ├── tests/                   # Testes automatizados
 │   ├── tools/
 │   │   ├── parser.ts            # Parser de tags 
