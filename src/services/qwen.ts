@@ -227,7 +227,7 @@ export interface QwenMessage {
   fid: string;
   parentId: string | null;
   childrenIds: string[];
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'system';
   content: string;
   user_action: string;
   files: any[];
@@ -246,7 +246,7 @@ export interface QwenMessage {
   extra: {
     meta: {
       subChatType: string;
-    };
+    }
   };
   sub_chat_type: string;
   parent_id: string | null;
@@ -420,7 +420,8 @@ export async function createQwenStream(
   accountId?: string,
   files?: QwenFileEntry[],
   pendingMultimodal?: Array<Array<{ type: string; text?: string; image_url?: { url: string }; video_url?: { url: string }; audio_url?: { url: string }; file_url?: { url: string } }>>,
-  existingChatId?: string
+  existingChatId?: string,
+  systemPrompt?: string  // NEW: System prompt passed separately
 ): Promise<{ stream: ReadableStream, headers: Record<string, string>, uiSessionId: string, controller: AbortController, accountId: string, chatId: string }> {
   let chatId: string;
   let chatHeaders: Record<string, string>;
@@ -496,6 +497,71 @@ export async function createQwenStream(
   const fid = crypto.randomUUID();
   const model = modelId.replace('-no-thinking', '');
 
+  // Build messages array with system prompt as separate message (if provided)
+  const messages: QwenMessage[] = [];
+
+  // Add system prompt as first message if provided
+  if (systemPrompt && systemPrompt.trim().length > 0) {
+    messages.push({
+      fid: crypto.randomUUID(),
+      parentId: null,
+      childrenIds: [],
+      role: 'system',
+      content: systemPrompt,
+      user_action: 'system',
+      files: [],
+      timestamp: timestamp,
+      models: [model],
+      chat_type: 't2t',
+      feature_config: {
+        thinking_enabled: false,
+        output_schema: 'phase',
+        research_mode: 'normal',
+        auto_thinking: false,
+        thinking_mode: 'Thinking',
+        thinking_format: 'summary',
+        auto_search: false
+      },
+      extra: {
+        meta: {
+          subChatType: 't2t'
+        }
+      },
+      sub_chat_type: 't2t',
+      parent_id: null
+    });
+  }
+
+  // Add user message
+  messages.push({
+    fid: fid,
+    parentId: actualParentId,
+    childrenIds: [],
+    role: 'user',
+    content: prompt,
+    user_action: 'chat',
+    files: resolvedFiles,
+    timestamp: timestamp,
+    models: [model],
+    chat_type: 't2t',
+    feature_config: {
+      thinking_enabled: enableThinking,
+      output_schema: 'phase',
+      research_mode: 'normal',
+      auto_thinking: false,
+      thinking_mode: 'Thinking',
+      thinking_format: 'summary',
+      auto_search: false
+    },
+    extra: {
+      meta: {
+        subChatType: 't2t'
+      }
+    },
+    sub_chat_type: 't2t',
+    parent_id: actualParentId
+  });
+
   const payload: QwenPayload = {
     stream: true,
     version: '2.1',
@@ -504,36 +570,7 @@ export async function createQwenStream(
     chat_mode: 'normal',
     model: model,
     parent_id: actualParentId,
-    messages: [
-      {
-        fid: fid,
-        parentId: actualParentId,
-        childrenIds: [],
-        role: 'user',
-        content: prompt,
-        user_action: 'chat',
-        files: resolvedFiles,
-        timestamp: timestamp,
-        models: [model],
-        chat_type: 't2t',
-        feature_config: {
-          thinking_enabled: enableThinking,
-          output_schema: 'phase',
-          research_mode: 'normal',
-          auto_thinking: false,
-          thinking_mode: 'Thinking',
-          thinking_format: 'summary',
-          auto_search: false
-        },
-        extra: {
-          meta: {
-            subChatType: 't2t'
-          }
-        },
-        sub_chat_type: 't2t',
-        parent_id: actualParentId
-      }
-    ],
+    messages,
     timestamp: timestamp + 1
   };
 

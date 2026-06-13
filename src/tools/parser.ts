@@ -458,6 +458,44 @@ export class StreamingToolParser {
       if (first.name) return first;
     }
 
+    // NEW: Try to repair Qwen's split JSON format: {"name":"tool"}\n{"arguments":{...}}
+    const repaired = this.tryRepairSplitJsonToolCall(unescaped);
+    if (repaired) {
+      return repaired;
+    }
+
+    return null;
+  }
+
+  /**
+   * Attempt to repair Qwen's common malformed tool call format:
+   * {"name": "tool_name"}\n{"arguments": {"param": "value"}}
+   * These are two separate JSON objects that should be one.
+   */
+  private tryRepairSplitJsonToolCall(block: string): ParsedToolCall | null {
+    const lines = block.split('\n').map(l => l.trim()).filter(l => l.startsWith('{') && l.endsWith('}'));
+    if (lines.length < 2) return null;
+
+    // Look for consecutive lines where first has "name" and second has "arguments"
+    for (let i = 0; i < lines.length - 1; i++) {
+      try {
+        const first = JSON.parse(lines[i]);
+        const second = JSON.parse(lines[i + 1]);
+        
+        const firstName = first.name || first.function?.name || first.tool_name || first.tool;
+        const secondArgs = second.arguments || second.function?.arguments || second.args || second.parameters || second.input;
+        
+        if (firstName && typeof firstName === 'string' && firstName.length > 0 && secondArgs && typeof secondArgs === 'object') {
+          // Found split tool call! Join them.
+          const args = typeof secondArgs === 'string' ? JSON.parse(secondArgs) : secondArgs;
+          return {
+            id: `call_${crypto.randomUUID()}`,
+            name: firstName,
+            arguments: args
+          };
+        }
+      } catch {}
+    }
     return null;
   }
 
@@ -476,6 +514,14 @@ export class StreamingToolParser {
     // Always try line-by-line parsing for multi-JSON content (independent of single parse)
     if (str.includes('\n')) {
       const lines = str.split('\n').map(l => l.trim()).filter(l => l.startsWith('{') && l.endsWith('}'));
+      
+      // NEW: Try to repair split JSON format BEFORE individual line parsing
+      const repaired = this.tryRepairSplitJsonToolCall(str);
+      if (repaired) {
+        calls.push(repaired);
+        return calls; // Return early if we found a repaired tool call
+      }
+      
       for (const line of lines) {
         try {
           const parsed = JSON.parse(line);

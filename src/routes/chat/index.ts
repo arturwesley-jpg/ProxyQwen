@@ -44,7 +44,8 @@ async function callQwenAndGetFullResponse(
   isThinkingModel: boolean,
   model: string,
   accountId?: string,
-  chatId?: string
+  chatId?: string,
+  systemPrompt?: string  // NEW: Optional system prompt
 ): Promise<{ content: string; tool_calls?: any[]; reasoning_content?: string }> {
   const result = await createQwenStream(
     prompt,
@@ -54,7 +55,8 @@ async function callQwenAndGetFullResponse(
     accountId,
     undefined,
     undefined,
-    chatId
+    chatId,
+    systemPrompt  // NEW
   );
   
   let fullContent = '';
@@ -292,13 +294,14 @@ export async function chatCompletions(c: Context) {
     
     // Select account and create stream
     const accountResult = await selectAccountAndCreateStream(
-      async (prompt: string, thinking: boolean, mdl: string, parentId: string | null, accId: string | undefined, files: any, multimodal: any, existingChatId: string | undefined) => {
+      async (prompt: string, thinking: boolean, mdl: string, parentId: string | null, accId: string | undefined, files: any, multimodal: any, existingChatId: string | undefined, sysPrompt?: string) => {
         return createQwenStream(
-          prompt, thinking, mdl, parentId, accId, files, multimodal, existingChatId
+          prompt, thinking, mdl, parentId, accId, files, multimodal, existingChatId, sysPrompt
         );
       },
       {
         finalPrompt,
+        systemPrompt,  // NEW: Pass system prompt separately
         isThinkingModel,
         model: routedModel,  // Use routed model
         accountId: undefined,

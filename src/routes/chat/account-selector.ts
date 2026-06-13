@@ -73,6 +73,7 @@ export async function selectAccountAndCreateStream(
   createQwenStreamFn: Function,
   deps: {
     finalPrompt: string;
+    systemPrompt?: string;  // NEW: Pass system prompt separately
     isThinkingModel: boolean;
     model: string;
     accountId: string | undefined;
@@ -87,6 +88,7 @@ export async function selectAccountAndCreateStream(
 ): Promise<{ stream: any; accountUsed: AccountInfo | null; acquiredLock: { release: () => void; accountId: string } | null; uiSessionId: string } | null> {
   const {
     finalPrompt,
+    systemPrompt,  // NEW
     isThinkingModel,
     model,
     pendingMultimodal,
@@ -182,7 +184,8 @@ export async function selectAccountAndCreateStream(
             accountIdKey === 'global' ? undefined : accountIdKey,
             undefined,
             pendingMultimodal.length > 0 ? pendingMultimodal : undefined,
-            useExistingChatLocal ? forcedChatIdLocal : undefined
+            useExistingChatLocal ? forcedChatIdLocal : undefined,
+            systemPrompt  // NEW: Pass system prompt
           );
           
           stream = result.stream;

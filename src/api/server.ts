@@ -11,10 +11,68 @@ import { warmPoolStatus, warmPoolRefill } from '../routes/warm-pool-status.js'
 import { uploadFile } from '../routes/upload.js'
 import { getStats as getSessionStats, cleanupOldSessions, deleteSession, closeSessionDb } from '../core/session-manager.js'
 import { getAllLocks, getLockMetrics } from '../core/account-lock.js'
+import { buildToolCallReinforcement } from '../routes/chat/helpers.js';
+import type { Message } from '../utils/types.js';
 
 // S2: Push lock metrics into the global metrics registry every collection cycle
 // This makes contentionRate and activeLocks visible at /metrics (Prometheus format).
 import { metrics as globalMetrics } from '../core/metrics.js'
+
+/**
+ * Build system prompt for /v1/system-prompt endpoint
+ * Mirrors the logic in chatCompletions to ensure consistency
+ */
+function buildSystemPrompt(requestBody: any): string {
+  let systemPrompt = '';
+  
+  // Base system prompt (from extractPrompt logic)
+  if (requestBody.messages && Array.isArray(requestBody.messages)) {
+    for (const msg of requestBody.messages) {
+      if (msg.role === 'system') {
+        let contentStr = '';
+        if (Array.isArray(msg.content)) {
+          const textParts: string[] = [];
+          for (const p of msg.content as any[]) {
+            if (p.type === 'text' && p.text) {
+              textParts.push(p.text);
+            }
+          }
+          contentStr = textParts.join('\n');
+        } else if (typeof msg.content === 'object' && msg.content !== null) {
+          contentStr = JSON.stringify(msg.content);
+        } else {
+          contentStr = msg.content || '';
+        }
+        systemPrompt += (contentStr) + '\n\n';
+      }
+    }
+  }
+
+  // Inject tools into system prompt (same logic as chatCompletions)
+  const bodyAny = requestBody as any;
+  if (bodyAny.tools && Array.isArray(bodyAny.tools) && bodyAny.tools.length > 0) {
+    const formattedTools = bodyAny.tools.map((t: any) => {
+      if (t.type === 'function') {
+        return {
+          name: t.function.name,
+          description: t.function.description || '',
+          parameters: t.function.parameters
+        };
+      }
+      return t;
+    });
+    const toolsJson = JSON.stringify(formattedTools, null, 2);
+    
+    const forcedTool = bodyAny.tool_choice && typeof bodyAny.tool_choice === 'object' && bodyAny.tool_choice.function
+      ? bodyAny.tool_choice.function.name
+      : undefined;
+    
+    systemPrompt += `\n\n# TOOLS AVAILABLE\nYou have access to the following tools:\n${toolsJson}\n\n` + buildToolCallReinforcement(true, forcedTool);
+  }
+
+  return systemPrompt;
+}
+
 function pushLockMetrics() {
   try {
     const m = getLockMetrics();
@@ -27,7 +85,6 @@ function pushLockMetrics() {
     globalMetrics.gauge('locks.contention_rate_per_mille', Math.round(m.contentionRate * 1000));
   } catch {}
 }
-
 
 const app = new Hono()
 
@@ -69,6 +126,33 @@ app.use('/v1/*', async (c, next) => {
   await next()
 })
 
+// NEW: /v1/system-prompt endpoint for subagents to fetch correct system prompt with tool format enforcement
+app.post('/v1/system-prompt', async (c) => {
+  try {
+    const body = await c.req.json();
+    const systemPrompt = buildSystemPrompt(body);
+    
+    // Also return the tools array for convenience
+    const tools = body.tools && Array.isArray(body.tools) 
+      ? body.tools.map((t: any) => t.type === 'function' ? {
+          name: t.function.name,
+          description: t.function.description || '',
+          parameters: t.function.parameters
+        } : t)
+      : [];
+    
+    return c.json({
+      systemPrompt,
+      tools,
+      hasTools: tools.length > 0,
+      toolChoice: body.tool_choice || null
+    });
+  } catch (err: any) {
+    console.error('[SystemPrompt] Error:', err.message);
+    return c.json({ error: err.message }, 400);
+  }
+})
+
 app.route('', modelsApp)
 app.post('/v1/chat/completions', chatCompletions)
 app.post('/v1/chat/completions/stop', chatCompletionsStop)
@@ -108,7 +192,7 @@ app.delete('/sessions/:id', (c) => {
 
 app.get('/metrics', (c) => {
   return c.text(metrics.formatPrometheus(), {
-    headers: { 'Content-Type': 'text/plain; version=0.0.4' },
+    headers: { 'Content-Type': 'text/plain; version=0.0.4' }
   })
 })
 
