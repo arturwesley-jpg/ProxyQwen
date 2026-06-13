@@ -195,7 +195,23 @@ export async function selectAccountAndCreateStream(
           retries--;
           console.error(`[Chat] createQwenStream error for ${accountEmail} (attempt ${4-retries}/3):`, err?.message, err?.upstreamCode, err?.upstreamStatus);
           lastError = err;
+
+          // Check for "chat is in progress" - force new chat immediately
+          const isChatInProgress = err.message?.includes('chat is in progress') || 
+             err.message?.includes('The chat is in progress');
           
+          if (isChatInProgress) {
+            console.warn(`[Chat] Chat in progress for ${accountEmail}, forcing new chat session`);
+            useExistingChatLocal = false;
+            forcedChatIdLocal = undefined;
+            forcedAccountIdLocal = undefined;
+            // Don't consume retry for this - just force new chat on next iteration
+            retries = 3; // Reset retries since we're trying a fresh approach
+            if (acquiredLock) { acquiredLock.release(); acquiredLock = null; }
+            account = getNextUnlockedAccount(accountIdKey);
+            continue;
+          }
+
           if (err.upstreamCode === 'RateLimited' || err.upstreamStatus === 429) {
             const hourHint = err.message?.match(/Wait about (\d+)\s*hour/i);
             const cooldownMs = hourHint ? parseInt(hourHint[1]) * 60 * 60 * 1000 : 19 * 60 * 60 * 1000;

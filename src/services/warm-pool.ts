@@ -18,6 +18,8 @@ interface WarmPoolEntry {
   lastUsedAt: number;
   useCount: number;
   healthy: boolean;
+  inUse: boolean;          // Track if chat is currently processing a request
+  inUseSince?: number;     // Timestamp when chat was marked in-use
 }
 
 interface PoolMetrics {
@@ -57,47 +59,60 @@ class WarmPoolManager {
     this.startBackgroundTasks();
   }
 
-  /**
-   * Acquire a warmed chat from pool, or create new if pool empty
-   * Returns { chatId, headers, fromPool: boolean }
-   */
+  /** Acquire a warmed chat from pool, or create new if pool empty */
   async acquire(accountId: string): Promise<{ chatId: string; headers: Record<string, string>; fromPool: boolean }> {
     const pool = this.getOrCreatePool(accountId);
     const metrics = this.getOrCreateMetrics(accountId);
 
-    // Try to get healthy entry from pool
+    // Try to get healthy entry from pool (not in use)
     const entry = this.popHealthyEntry(pool);
-    
+
     if (entry) {
       metrics.hits++;
       entry.lastUsedAt = Date.now();
       entry.useCount++;
+      entry.inUse = true;
+      entry.inUseSince = Date.now();
       this.maybeTriggerRefill(accountId, pool.length);
       return { chatId: entry.chatId, headers: entry.headers, fromPool: true };
     }
 
-    // Pool miss - create new chat directly (fallback)
+    // Pool miss - create new chat and add to pool as inUse
     metrics.misses++;
     const headers = await this.createChatHeaders(accountId);
     const chatId = await createRealQwenChat(headers);
     metrics.created++;
-    
+
+    // Add new chat to pool with inUse=true so concurrent requests see it's busy
+    const newEntry: WarmPoolEntry = {
+      chatId,
+      headers,
+      accountId,
+      createdAt: Date.now(),
+      lastUsedAt: Date.now(),
+      useCount: 1,
+      healthy: true,
+      inUse: true,
+      inUseSince: Date.now(),
+    };
+    pool.push(newEntry);
+
     return { chatId, headers, fromPool: false };
   }
 
-  /**
-   * Return a chat to pool after use (if still healthy)
-   */
+  /** Return a chat to pool after use (if still healthy) */
   async release(accountId: string, chatId: string, headers: Record<string, string>): Promise<void> {
     const pool = this.getOrCreatePool(accountId);
     const existingIdx = pool.findIndex(e => e.chatId === chatId);
-    
+
     if (existingIdx >= 0) {
       // Update existing entry
       const entry = pool[existingIdx];
       entry.lastUsedAt = Date.now();
       entry.headers = headers; // Refresh headers (cookies may have rotated)
       entry.healthy = true;
+      entry.inUse = false;
+      entry.inUseSince = undefined;
     } else if (pool.length < this.config.maxPoolPerAccount) {
       // Add new entry
       pool.push({
@@ -108,44 +123,41 @@ class WarmPoolManager {
         lastUsedAt: Date.now(),
         useCount: 1,
         healthy: true,
+        inUse: false,
       });
     }
     // If pool full or chat overused, let it be GC'd
   }
 
-  /**
-   * Mark chat as unhealthy (e.g., after stream error)
-   */
+  /** Mark chat as unhealthy (e.g., after stream error) */
   markUnhealthy(accountId: string, chatId: string): void {
     const pool = this.pools.get(accountId);
     if (!pool) return;
-    
+
     const entry = pool.find(e => e.chatId === chatId);
     if (entry) {
       entry.healthy = false;
     }
   }
 
-  /**
-   * Get pool snapshot for monitoring
-   */
+  /** Get pool snapshot for monitoring */
   getSnapshot(accountId?: string): Record<string, any> {
     const result: Record<string, any> = {};
     const accounts = accountId ? [accountId] : Array.from(this.pools.keys());
-    
+
     for (const acc of accounts) {
       const pool = this.pools.get(acc) || [];
       const metrics = this.metrics.get(acc) || { hits: 0, misses: 0, created: 0, failed: 0, evicted: 0, refills: 0 };
       const now = Date.now();
       const healthy = pool.filter(e => e.healthy && now - e.lastUsedAt < this.config.ttlMs);
-      
+
       result[acc] = {
         total: pool.length,
         healthy: healthy.length,
         stale: pool.length - healthy.length,
         oldestMs: pool.length > 0 ? now - Math.min(...pool.map(e => e.createdAt)) : null,
         metrics,
-        hitRate: metrics.hits + metrics.misses > 0 
+        hitRate: metrics.hits + metrics.misses > 0
           ? (metrics.hits / (metrics.hits + metrics.misses) * 100).toFixed(1) + '%'
           : '0%',
       };
@@ -153,9 +165,7 @@ class WarmPoolManager {
     return result;
   }
 
-  /**
-   * Get aggregated metrics across all accounts
-   */
+  /** Get aggregated metrics across all accounts */
   getAggregatedMetrics(): PoolMetrics & { hitRate: string; accounts: number } {
     let totals: PoolMetrics = { hits: 0, misses: 0, created: 0, failed: 0, evicted: 0, refills: 0 };
     for (const m of this.metrics.values()) {
@@ -168,24 +178,20 @@ class WarmPoolManager {
     }
     return {
       ...totals,
-      hitRate: totals.hits + totals.misses > 0 
+      hitRate: totals.hits + totals.misses > 0
         ? (totals.hits / (totals.hits + totals.misses) * 100).toFixed(1) + '%'
         : '0%',
       accounts: this.metrics.size,
     };
   }
 
-  /**
-   * Force refill for specific account
-   */
+  /** Force refill for specific account */
   async forceRefill(accountId: string): Promise<number> {
     const pool = this.getOrCreatePool(accountId);
     return await this.doRefill(accountId, pool);
   }
 
-  /**
-   * Shutdown gracefully
-   */
+  /** Shutdown gracefully */
   shutdown(): void {
     if (this.cleanupInterval) clearInterval(this.cleanupInterval);
     if (this.healthCheckInterval) clearInterval(this.healthCheckInterval);
@@ -217,28 +223,38 @@ class WarmPoolManager {
 
   private popHealthyEntry(pool: WarmPoolEntry[]): WarmPoolEntry | null {
     const now = Date.now();
-    // Find best candidate: healthy, not too old, not overused
+    // Find best candidate: healthy, not in use, not too old, not overused
     let bestIdx = -1;
     let bestScore = -1;
-    
+
     for (let i = 0; i < pool.length; i++) {
       const entry = pool[i];
       if (!entry.healthy) continue;
+      if (entry.inUse) {
+        // Check for stale in-use (stuck request) - force release after 5 minutes
+        if (entry.inUseSince && now - entry.inUseSince > 5 * 60 * 1000) {
+          console.warn(`[WarmPool] Chat ${entry.chatId} stuck in-use for ${Math.round((now - entry.inUseSince) / 1000)}s, forcing release`);
+          entry.inUse = false;
+          entry.inUseSince = undefined;
+        } else {
+          continue;
+        }
+      }
       if (now - entry.lastUsedAt > this.config.ttlMs) continue;
       if (now - entry.createdAt > this.config.maxAgeMs) continue;
       if (entry.useCount >= this.config.maxUses) continue;
-      
+
       // Score: prefer recently used, less used entries
       const ageScore = 1 - (now - entry.lastUsedAt) / this.config.ttlMs;
       const useScore = 1 - entry.useCount / this.config.maxUses;
       const score = ageScore * 0.6 + useScore * 0.4;
-      
+
       if (score > bestScore) {
         bestScore = score;
         bestIdx = i;
       }
     }
-    
+
     if (bestIdx >= 0) {
       return pool.splice(bestIdx, 1)[0];
     }
@@ -252,12 +268,12 @@ class WarmPoolManager {
 
   private maybeTriggerRefill(accountId: string, currentSize: number): void {
     if (currentSize >= this.config.minPoolPerAccount) return;
-    
+
     const lastRefill = this.lastRefillAt.get(accountId) || 0;
     const now = Date.now();
     if (now - lastRefill < this.config.refillCooldownMs) return;
     if (this.refillInFlight.get(accountId)) return;
-    
+
     // Fire and forget
     this.doRefill(accountId, this.getOrCreatePool(accountId)).catch(err => {
       console.error(`[WarmPool] Refill failed for ${accountId}:`, err.message);
@@ -280,9 +296,9 @@ class WarmPoolManager {
 
     try {
       const headers = await this.createChatHeaders(accountId);
-      const createPromises = Array.from({ length: need }, () => 
+      const createPromises = Array.from({ length: need }, () =>
         createRealQwenChat(headers)
-          .then((chatId: string) => ({ chatId, headers, accountId, createdAt: Date.now(), lastUsedAt: Date.now(), useCount: 0, healthy: true }))
+          .then((chatId: string) => ({ chatId, headers, accountId, createdAt: Date.now(), lastUsedAt: Date.now(), useCount: 0, healthy: true, inUse: false }))
           .catch((err: Error) => {
             metrics.failed++;
             console.error(`[WarmPool] Create chat failed:`, err.message);
@@ -298,7 +314,7 @@ class WarmPoolManager {
           added++;
         }
       }
-      
+
       console.log(`[WarmPool] Refilled ${accountId}: +${added} (pool: ${pool.length}/${this.config.maxPoolPerAccount})`);
       return added;
     } finally {
@@ -309,7 +325,7 @@ class WarmPoolManager {
   private startBackgroundTasks(): void {
     // Cleanup stale entries
     this.cleanupInterval = setInterval(() => this.cleanup(), this.config.healthCheckIntervalMs);
-    
+
     // Health check (ping chats to verify they're still alive)
     this.healthCheckInterval = setInterval(() => this.healthCheck(), this.config.healthCheckIntervalMs);
   }
@@ -320,24 +336,24 @@ class WarmPoolManager {
 
     for (const [accountId, pool] of this.pools.entries()) {
       const initialLen = pool.length;
-      
+
       // Filter: healthy + within TTL + within maxAge + under maxUses
-      const filtered = pool.filter(e => 
+      const filtered = pool.filter(e =>
         e.healthy &&
         now - e.lastUsedAt < this.config.ttlMs &&
         now - e.createdAt < this.config.maxAgeMs &&
         e.useCount < this.config.maxUses
       );
-      
+
       const evicted = initialLen - filtered.length;
       if (evicted > 0) {
         const metrics = this.getOrCreateMetrics(accountId);
         metrics.evicted += evicted;
         totalEvicted += evicted;
       }
-      
+
       this.pools.set(accountId, filtered);
-      
+
       // Clean empty pools
       if (filtered.length === 0) {
         this.pools.delete(accountId);
@@ -357,21 +373,21 @@ class WarmPoolManager {
     for (const [accountId, pool] of this.pools.entries()) {
       const healthyEntries = pool.filter(e => e.healthy);
       if (healthyEntries.length === 0) continue;
-      
+
       // Check up to 2 chats per cycle
       const toCheck = healthyEntries.slice(0, 2);
-      
+
       for (const entry of toCheck) {
         try {
           // Quick health check: send a minimal request to chat endpoint
           // If it fails, mark unhealthy
           const controller = new AbortController();
           const timeout = setTimeout(() => controller.abort(), this.config.healthCheckTimeoutMs);
-          
+
           // We don't actually send - just verify headers are fresh
           // Real check would be: POST to /api/v2/chats/{chatId}/messages with tiny payload
           // For now, trust the TTL + headers refresh on release
-          
+
           clearTimeout(timeout);
         } catch {
           entry.healthy = false;

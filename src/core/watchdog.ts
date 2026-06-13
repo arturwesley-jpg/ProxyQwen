@@ -109,6 +109,8 @@ export class Watchdog extends EventEmitter {
       metrics.increment('watchdog.recovery.failed')
     } finally {
       this.recoveryInProgress = false
+      // Reset failure counter after recovery attempt to prevent immediate re-trigger
+      this.consecutiveFailures = 0
     }
   }
 

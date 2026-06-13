@@ -268,7 +268,9 @@ export async function startServer(): Promise<void> {
     await closePlaywright()
     const { closeDatabase } = await import('../core/database.js')
     closeDatabase()
-    server?.close()
+    if (server) {
+      await server.close()
+    }
     process.exit(0)
   }
 
