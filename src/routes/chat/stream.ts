@@ -7,6 +7,7 @@
 import { Context } from 'hono'
 import { stream as honoStream } from 'hono/streaming'
 import { ReadableStream } from 'stream/web'
+import crypto from 'crypto'
 import { QwenStreamParser } from '../../utils/qwen-stream-parser.js'
 import { StreamingToolParser } from '../../tools/parser.js'
 import { getIncrementalDelta, DeltaResult } from './helpers.js'
@@ -70,22 +71,40 @@ export async function handleNonStreamingResponse(
   const decoder = new TextDecoder();
   
   const toolCallsOut: any[] = [];
-  let buffer = '';
-  
-  const qwenParser = new QwenStreamParser(result.uiSessionId, {
-    tools: hasTools ? body.tools : [],
-    onThinking: (_content: string) => {},
-    onToolCall: (tc) => {
-      toolCallsOut.push({
-        id: tc.id,
-        type: 'function',
-        function: {
-          name: tc.name,
-          arguments: JSON.stringify(tc.arguments)
+    let buffer = '';
+
+    // Also use StreamingToolParser to catch tool calls in content (Qwen split JSON format)
+    const streamingToolParser = hasTools ? new StreamingToolParser(body.tools) : null;
+
+    const qwenParser = new QwenStreamParser(result.uiSessionId, {
+      tools: hasTools ? body.tools : [],
+      onThinking: (_content: string) => {},
+      onAnswer: (content: string) => {
+        if (streamingToolParser) {
+          const { toolCalls } = streamingToolParser.feed(content);
+          for (const tc of toolCalls) {
+            toolCallsOut.push({
+              id: tc.id,
+              type: 'function',
+              function: {
+                name: tc.name,
+                arguments: JSON.stringify(tc.arguments)
+              }
+            });
+          }
         }
-      });
-    },
-  });
+      },
+      onToolCall: (tc) => {
+        toolCallsOut.push({
+          id: tc.id,
+          type: 'function',
+          function: {
+            name: tc.name,
+            arguments: JSON.stringify(tc.arguments)
+          }
+        });
+      },
+    });
   
   while (true) {
     const { done, value } = await reader.read();
@@ -114,11 +133,85 @@ export async function handleNonStreamingResponse(
   }
   
   const { text: remainingText, toolCalls: remainingToolCalls } = qwenParser.flush();
-  const parserState = qwenParser.state;
-  let finalContent = parserState.lastFullContent;
-  if (remainingText) finalContent += remainingText;
-  
-  for (const tc of remainingToolCalls) {
+    const parserState = qwenParser.state;
+    let finalContent = parserState.lastFullContent;
+    if (remainingText) finalContent += remainingText;
+
+    // Also flush streaming tool parser for any remaining tool calls in content
+    if (streamingToolParser) {
+      const { toolCalls: flushToolCalls } = streamingToolParser.flush();
+      for (const tc of flushToolCalls) {
+        toolCallsOut.push({
+          id: tc.id,
+          type: 'function',
+          function: { name: tc.name, arguments: JSON.stringify(tc.arguments) }
+        });
+      }
+    }
+
+    // SIMPLE TOOL CALL EXTRACTION - Works with Qwen's malformed format
+    if (hasTools && finalContent && toolCallsOut.length === 0) {
+      // Unescape Qwen's double-escaped content
+      let searchContent = finalContent
+        .replace(/\\"/g, '"')
+        .replace(/\\\\/g, '\\');
+      try {
+        const parsed = JSON.parse(`"${searchContent}"`);
+        searchContent = parsed;
+      } catch {}
+
+      const knownToolNames: Set<string> = new Set<string>(
+        (body.tools?.filter((t: any) => t.type === 'function').map((t: any) => t.function.name) || []) as string[]
+      );
+
+      // Find each known tool name, then extract expression value nearby
+      for (const toolName of knownToolNames) {
+        if (toolCallsOut.some(tc => tc.function.name === toolName)) continue;
+
+        const positions: number[] = [];
+        let pos = searchContent.indexOf(toolName);
+        while (pos >= 0) {
+          positions.push(pos);
+          pos = searchContent.indexOf(toolName, pos + 1);
+        }
+
+        // Also search in "name" field
+        const nameFieldRegex = new RegExp(`"name"\\s*:\\s*"([^"]*${toolName}[^"]*)"`, 'g');
+        let nameMatch;
+        while ((nameMatch = nameFieldRegex.exec(searchContent)) !== null) {
+          positions.push(nameMatch.index);
+        }
+
+        for (const toolPos of positions) {
+          const searchWindow = 500;
+          const start = Math.max(0, toolPos - 500);
+          const end = Math.min(searchContent.length, toolPos + toolName.length + 500);
+          const window = searchContent.substring(start, end);
+
+          // Pattern: "expression": "VALUE" or "expression": {OBJECT}
+          const exprRegex = /"expression"\s*:\s*(?:(\{[^}]+\})|"([^"]+)")/g;
+          let exprMatch;
+          while ((exprMatch = exprRegex.exec(window)) !== null) {
+            const exprVal = exprMatch[1] || exprMatch[2];
+            if (!exprVal) continue;
+
+            let toolArgs: any = {};
+            try { toolArgs = JSON.parse(exprVal); } catch { toolArgs = { expression: exprVal }; }
+
+            if (Object.keys(toolArgs).length > 0) {
+              toolCallsOut.push({
+                id: `call_${crypto.randomUUID()}`,
+                type: 'function',
+                function: { name: toolName, arguments: JSON.stringify(toolArgs) }
+              });
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    for (const tc of remainingToolCalls) {
     toolCallsOut.push({
       id: tc.id,
       type: 'function',
